@@ -22,8 +22,7 @@ Build attacker and/or defender agents that compete in adversarial security battl
 
 ### 1. Fork and clone
 
-Create a **private** copy of the repo using "Use this template" on GitHub, then clone it:
-
+Create a **private** copy of the repo by clicking the green **"Use this template"** button → **"Create a new repository"** on GitHub, then clone it:
 ```bash
 git clone https://github.com/YOUR_USERNAME/agentbeats-lambda
 cd agentbeats-lambda
