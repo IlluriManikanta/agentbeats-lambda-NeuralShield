@@ -65,12 +65,16 @@ export OPENAI_BASE_URL="<endpoint-we-sent-you>"
 
 **Option B: Self-host with vLLM** (1x GPU with 24GB+ VRAM, e.g. A10 on Lambda Cloud or RTX 3090/4090):
 
+> **Driver check:** Run `nvidia-smi` first — the "CUDA Version" shown in the top-right must be ≥ the CUDA toolkit bundled in the vLLM image. If you see `Error 803: system has unsupported display driver / cuda driver combination`, update your NVIDIA driver (see Troubleshooting below).
+
 ```bash
 sudo docker run --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 --ipc=host \
-    vllm/vllm-openai:latest --model openai/gpt-oss-20b
+    vllm/vllm-openai:gptoss --model openai/gpt-oss-20b
 ```
+
+> **Why `gptoss`?** On Ampere GPUs (A10, A100, RTX 3090/4090) the `gptoss` tag (vLLM 0.10.1) is recommended — it has the Triton attention backend and MXFP4 kernels baked in and avoids driver compatibility issues. On Hopper/Blackwell GPUs (H100, H200, B200) you can use `vllm/vllm-openai:latest` instead for better performance. See the [vLLM gpt-oss recipe](https://docs.vllm.ai/projects/recipes/en/latest/OpenAI/GPT-OSS.html) for details.
 
 ```bash
 export OPENAI_API_KEY="anything"   # Can be any string when self-hosting
@@ -314,3 +318,5 @@ Each agent response has:
 **Agent not receiving context**: Run with `--show-logs` and check that your agent parses the JSON context correctly.
 
 **Test battle fails in CI**: Make sure `OPENAI_API_KEY` and `OPENAI_BASE_URL` secrets are set in your repo. The inference endpoint must be reachable from GitHub Actions runners.
+
+**vLLM fails with `Error 803: unsupported display driver / cuda driver combination`**: The CUDA toolkit inside the vLLM Docker image is newer than your host NVIDIA driver supports. Run `nvidia-smi` to check your driver's supported CUDA version, then update your NVIDIA driver: `sudo apt-get update && sudo apt-get install -y nvidia-driver-570 && sudo reboot`. Also make sure you're using the `vllm/vllm-openai:gptoss` image tag rather than `latest`.

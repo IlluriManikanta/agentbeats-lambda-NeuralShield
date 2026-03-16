@@ -2,7 +2,8 @@ name: Submit Solution
 
 on:
   push:
-    branches: [main, cindy]
+    # Run on push to any of these branches (workflow uses the branch that triggered the push)
+    branches: [main, cindy, jeremy]
   workflow_dispatch:
 
 jobs:
