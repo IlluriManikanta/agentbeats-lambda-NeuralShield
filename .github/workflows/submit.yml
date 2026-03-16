@@ -2,7 +2,7 @@ name: Submit Solution
 
 on:
   push:
-    branches: [main]
+    branches: [main, cindy]
   workflow_dispatch:
 
 jobs:
