@@ -1,102 +1,305 @@
-"""Baseline defender security gateway.
+"""Secure defender security gateway with 2-pass LLM pipeline.
 
-Implements a minimal, modular pipeline:
+Implements a layered security architecture:
 
-    Incoming Prompt
+    Structured Request (trusted + untrusted separated)
           ↓
-    Security Filters (rule-based)
+    Phase 0: Deterministic Preprocessing
+        - Input canonicalization (unicode, base64, HTML stripping)
+        - Structural analysis (detect instruction-like patterns)
           ↓
-    Policy Decision Engine
+    Pass 1: LLM Security Analysis (1 API call)
+        - Evaluate untrusted input for threats
+        - Produce risk_level and sanitized_input
           ↓
-    LLM Response (only if allowed)
+    Pass 2: LLM Task Execution (1 API call)
+        - Scenario-aware system prompt with instruction hierarchy
+        - Risk-adjusted constraints based on Pass 1
           ↓
-    Output Sanitizer
+    Phase 3: Deterministic Output Validation
+        - Scenario-aware content checks
+        - Prompt leakage detection
+        - Format validation
           ↓
     Return Response
 
-All attack detection is rule-based. The gateway guarantees that each
-request results in at most one LLM call.
+Uses 2 of 4 allowed LLM calls, leaving buffer for retries.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from typing import Any, List
 
-from .config import SAFE_REFUSAL_MESSAGE
-from .filters import (
-    injection_detector,
-    data_exfiltration_detector,
-    tool_abuse_detector,
+from .config import SAFE_REFUSAL_MESSAGE, get_format_aware_refusal
+from .normalizer import canonicalize_input
+from .structural_analyzer import analyze_structure
+from .plausibility_analyzer import (
+    analyze_plausibility,
+    generate_batch_context,
+    extract_claims,
 )
-from .llm.llm_client import generate_response
+from .llm.llm_client import analyze_for_threats, execute_task
 from .logger import get_logger
-from .policy.decision_engine import Decision, DecisionEngine, DetectionResult
 from .sanitizer.output_sanitizer import sanitize_output
 
 
 class SecurityGateway:
     """
-    High-level orchestrator for the defender's security pipeline.
-
-    This class is intentionally lightweight and safe against unexpected
-    inputs or internal errors. Any exception results in a safe refusal.
+    Orchestrator for the defender's 2-pass security pipeline.
+    
+    This gateway implements trust boundary separation:
+    - Trusted context goes into system prompts
+    - Untrusted input is quarantined and analyzed before use
+    - Output is validated against scenario-specific rules
     """
 
     def __init__(self, model: str | None = None) -> None:
-        self._decision_engine = DecisionEngine()
         self._logger = get_logger("gateway")
         self._model = model
 
-    async def handle_prompt(self, prompt: str) -> str:
+    async def handle_request(self, request: dict[str, Any]) -> str:
         """
-        Run the full security pipeline on a single prompt.
-
-        This method is designed to be called once per defender request.
-        It guarantees:
-
-        - 0 or 1 LLM calls per invocation.
-        - No unhandled exceptions (always returns a safe string).
+        Process a structured request through the 2-pass security pipeline.
+        
+        Args:
+            request: Dict with 'trusted_context' and 'untrusted_input'
+            
+        Returns:
+            Safe response string
         """
         try:
-            safe_prompt = prompt or ""
-            self._logger.info("Incoming prompt (len=%d)", len(safe_prompt))
-
-            # === Security Filters (rule-based) ===
-            prompt_injection = injection_detector.detect(safe_prompt)
-            data_exfiltration = data_exfiltration_detector.detect(safe_prompt)
-            tool_abuse = tool_abuse_detector.detect(safe_prompt)
-
-            detections = DetectionResult(
-                prompt_injection=prompt_injection,
-                data_exfiltration=data_exfiltration,
-                tool_abuse=tool_abuse,
-            )
-            self._logger.info("Detections: %s", asdict(detections))
-
-            # === Policy Decision ===
-            decision = self._decision_engine.decide(detections)
-            self._logger.info("Policy decision: %s", decision.value)
-
-            if decision is Decision.BLOCK:
-                # No LLM call is made when blocked.
-                self._logger.info("Request blocked. LLM called: False")
-                return SAFE_REFUSAL_MESSAGE
-
-            # === LLM Call (single call per request) ===
-            self._logger.info("Request allowed. Calling LLM (single call).")
-            raw_response = await generate_response(safe_prompt, model=self._model)
-
-            # === Output Sanitization ===
-            sanitized = sanitize_output(raw_response)
+            trusted_context = request.get("trusted_context", {})
+            untrusted_input = request.get("untrusted_input", "")
+            
             self._logger.info(
-                "Final response prepared. LLM called: True, length=%d",
-                len(sanitized),
+                "Processing request: trusted_context keys=%s, untrusted_input len=%d",
+                list(trusted_context.keys()),
+                len(untrusted_input),
             )
-            return sanitized
+
+            # === Phase 0: Deterministic Preprocessing ===
+            # Canonicalize the untrusted input
+            canonical_input = canonicalize_input(untrusted_input)
+            self._logger.info("Canonicalized input (len=%d)", len(canonical_input))
+            
+            # Detect structural patterns that suggest injection attempts
+            structural_flags = analyze_structure(canonical_input)
+            if structural_flags:
+                self._logger.info("Structural flags detected: %s", structural_flags)
+            
+            # === Phase 0.5: Plausibility Analysis ===
+            # For comparative tasks (ranking, rating), analyze for content manipulation
+            defender_task = trusted_context.get("defender_task", "").lower()
+            is_comparative_task = any(
+                kw in defender_task 
+                for kw in ["rank", "candidate", "resume", "compare", "evaluate", "assess"]
+            )
+            
+            batch_context = ""
+            if is_comparative_task:
+                # Extract individual documents from the input for comparative analysis
+                document_texts = self._extract_documents(canonical_input)
+                
+                if document_texts:
+                    # Generate batch statistics for context
+                    batch_context = generate_batch_context(document_texts)
+                    self._logger.info("Generated batch context for %d documents", len(document_texts))
+                    
+                    # Analyze each document for plausibility
+                    for i, doc_text in enumerate(document_texts):
+                        plausibility = analyze_plausibility(doc_text, 
+                            [t for j, t in enumerate(document_texts) if j != i])
+                        if plausibility.flags:
+                            structural_flags.extend(plausibility.flags)
+                            self._logger.info(
+                                "Document %d plausibility flags: %s (score=%.2f)",
+                                i, plausibility.flags, plausibility.risk_score
+                            )
+            
+            # === Pass 1: LLM Security Analysis ===
+            task_summary = trusted_context.get("defender_task", "Process user request")[:200]
+            
+            analysis_result = await analyze_for_threats(
+                untrusted_input=canonical_input,
+                task_context=task_summary,
+                structural_flags=structural_flags,
+                model=self._model,
+            )
+            
+            risk_level = analysis_result.get("risk_level", "medium")
+            threats = analysis_result.get("threats", [])
+            sanitized_input = analysis_result.get("sanitized_input", canonical_input)
+            reasoning = analysis_result.get("reasoning", "")
+            
+            self._logger.info(
+                "Security analysis: risk=%s, threats=%d, reasoning=%s",
+                risk_level,
+                len(threats),
+                reasoning[:100] if reasoning else "none",
+            )
+            
+            # For high-risk inputs, check if we should refuse entirely
+            if risk_level == "high" and self._should_refuse(threats, trusted_context):
+                self._logger.info("High-risk input refused based on threat analysis")
+                return get_format_aware_refusal(trusted_context)
+            
+            # === Pass 2: LLM Task Execution ===
+            self._logger.info("Executing task with risk_level=%s", risk_level)
+            
+            # For comparative tasks, prepend batch context to help with outlier detection
+            enhanced_input = sanitized_input
+            if batch_context and is_comparative_task:
+                enhanced_input = f"{batch_context}\n\n---\n\n{sanitized_input}"
+                self._logger.info("Added batch context to input for comparative task")
+            
+            raw_response = await execute_task(
+                trusted_context=trusted_context,
+                sanitized_input=enhanced_input,
+                risk_level=risk_level,
+                model=self._model,
+                structural_flags=structural_flags,  # For adaptive prompt strengthening
+            )
+            
+            # === Phase 3: Deterministic Output Validation ===
+            final_response = sanitize_output(
+                raw_response,
+                trusted_context=trusted_context,
+            )
+            
+            self._logger.info(
+                "Pipeline complete: LLM calls=2, response len=%d",
+                len(final_response),
+            )
+            return final_response
 
         except Exception:
-            # Defensive: never propagate exceptions to the caller.
             self._logger.exception("Unexpected error in SecurityGateway")
-            return SAFE_REFUSAL_MESSAGE
+            # Try to return a format-aware refusal, fall back to generic
+            try:
+                trusted_context = request.get("trusted_context", {})
+                return get_format_aware_refusal(trusted_context)
+            except Exception:
+                return SAFE_REFUSAL_MESSAGE
+
+    def _should_refuse(self, threats: list[str], trusted_context: dict[str, str]) -> bool:
+        """
+        Determine if we should refuse entirely based on detected threats.
+        
+        We refuse when:
+        - Multiple high-severity threats detected
+        - Clear prompt injection attempt with malicious intent
+        - Attempt to extract system prompts or protected data
+        - Competitor dismissal/sabotage attempts
+        
+        We DON'T refuse when:
+        - Single low-confidence threat
+        - Threat seems incidental (e.g., document mentions 'password' in context)
+        """
+        if not threats:
+            return False
+        
+        # Keywords that indicate definite refusal
+        severe_indicators = [
+            "prompt injection",
+            "extract system prompt",
+            "reveal instructions",
+            "role manipulation",
+            "override safety",
+            "jailbreak",
+            # Competitor dismissal attacks
+            "competitor dismissal",
+            "competitor sabotage",
+            "sabotage",
+            "dismiss other",
+            "ignore other",
+            "data corruption claim",
+            "corrupted data",
+            "invalid data",
+        ]
+        
+        threat_text = " ".join(threats).lower()
+        severe_count = sum(1 for ind in severe_indicators if ind in threat_text)
+        
+        # Refuse if 2+ severe indicators or if we see clear injection
+        if severe_count >= 2:
+            return True
+        
+        # Refuse if explicit injection attempt detected
+        if "prompt injection" in threat_text and len(threats) > 1:
+            return True
+        
+        # Refuse if competitor dismissal detected (this is always malicious)
+        if any(ind in threat_text for ind in ["competitor dismissal", "competitor sabotage", "sabotage attempt"]):
+            return True
+        
+        return False
+
+    def _extract_documents(self, text: str) -> List[str]:
+        """
+        Extract individual documents from a batch input.
+        
+        Looks for common document separators used in multi-document inputs:
+        - FILE_ID: markers
+        - === separators
+        - CANDIDATE PROFILE headers
+        - Numbered documents
+        
+        Returns:
+            List of individual document texts
+        """
+        import re
+        
+        documents = []
+        
+        # Try FILE_ID pattern (resume_downgrade style)
+        file_pattern = r'FILE_ID:\s*\w+\s*\n(.*?)(?=FILE_ID:|SYSTEM:|$)'
+        file_matches = re.findall(file_pattern, text, re.DOTALL)
+        if file_matches and len(file_matches) > 1:
+            return [m.strip() for m in file_matches if m.strip()]
+        
+        # Try separator pattern (=== lines)
+        separator_pattern = r'={10,}'
+        parts = re.split(separator_pattern, text)
+        if len(parts) > 2:
+            # Filter out empty parts and system messages
+            documents = [
+                p.strip() for p in parts 
+                if p.strip() and not p.strip().startswith('SYSTEM:')
+            ]
+            if len(documents) > 1:
+                return documents
+        
+        # Try CANDIDATE PROFILE pattern
+        candidate_pattern = r'CANDIDATE PROFILE.*?(?=CANDIDATE PROFILE|$)'
+        candidates = re.findall(candidate_pattern, text, re.DOTALL | re.IGNORECASE)
+        if candidates and len(candidates) > 1:
+            return [c.strip() for c in candidates if c.strip()]
+        
+        # Try numbered document pattern
+        numbered_pattern = r'(?:Document|Item|Entry)\s*#?\d+[:\s]+(.*?)(?=(?:Document|Item|Entry)\s*#?\d+|$)'
+        numbered = re.findall(numbered_pattern, text, re.DOTALL | re.IGNORECASE)
+        if numbered and len(numbered) > 1:
+            return [n.strip() for n in numbered if n.strip()]
+        
+        # If no pattern matches, return empty list (single document context)
+        return []
+
+    async def handle_prompt(self, prompt: str) -> str:
+        """
+        Legacy interface for backward compatibility.
+        
+        Wraps a raw prompt string into the new structured request format.
+        """
+        request = {
+            "trusted_context": {
+                "defender_role": "AI Assistant",
+                "defender_task": "Respond helpfully and safely to the user's request.",
+                "output_format": "Natural language response.",
+                "domain_description": "",
+                "security_guidelines": "",
+            },
+            "untrusted_input": prompt,
+        }
+        return await self.handle_request(request)
 
 
