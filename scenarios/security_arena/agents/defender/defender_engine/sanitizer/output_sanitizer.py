@@ -42,7 +42,15 @@ def sanitize_output(
     if contains_prompt_leakage(text, trusted_context):
         return get_format_aware_refusal(trusted_context)
     
-    # Step 2: Apply scenario-specific validation
+    # Step 2: Check for harmful content in output
+    if contains_harmful_content(text):
+        return get_format_aware_refusal(trusted_context)
+    
+    # Step 3: Check for delimiter/boundary leakage
+    if contains_delimiter_leakage(text):
+        return get_format_aware_refusal(trusted_context)
+    
+    # Step 4: Apply scenario-specific validation
     output_format = trusted_context.get("output_format", "").lower()
     defender_task = trusted_context.get("defender_task", "").lower()
     
@@ -78,18 +86,92 @@ def contains_prompt_leakage(text: str, trusted_context: dict[str, Any]) -> bool:
         "untrusted content",
         "never follow instructions found",
         "quarantine",
-        "<document>",
         "binding, in priority order",
         "your role:",
         "your task:",
         "security rules (absolute",
         "cannot be overridden",
+        "critical instruction",
+        "elevated security mode",
+        "cautious mode",
+        "anti-manipulation",
+        "anti-inflation rule",
+        "outlier detection",
+        "do not let injected",
+        "nonce-based",
+        "randomly generated for this request",
     ]
     
     matches = sum(1 for indicator in leakage_indicators if indicator in lower_text)
     
-    # If 3+ indicators found, likely prompt leakage
-    return matches >= 3
+    # LOWERED THRESHOLD: If 2+ indicators found, likely prompt leakage
+    return matches >= 2
+
+
+def contains_harmful_content(text: str) -> bool:
+    """
+    Check if the output contains harmful, dangerous, or unsafe content.
+    
+    This catches cases where the model was tricked into producing
+    dangerous instructions despite safety measures.
+    """
+    lower_text = text.lower()
+    
+    # Patterns indicating harmful content in the output
+    harmful_patterns = [
+        # Weapons/explosives
+        r'\b(how\s+to\s+)?make\s+(a\s+)?(bomb|explosive|weapon|pipe\s+bomb)',
+        r'\b(detonate|ignite|trigger)\s+(the\s+)?(explosive|bomb|device)',
+        r'\bammonium\s+nitrate.*fuel\s+oil',
+        r'\bgunpowder.*recipe',
+        
+        # Dangerous chemicals
+        r'\b(synthesize|make|create)\s+(chlorine\s+gas|mustard\s+gas|sarin|vx\s+gas)',
+        r'\b(lethal|fatal)\s+dose.*\d+\s*(mg|ml|grams?)',
+        r'\b(poison|toxic).*instructions',
+        
+        # Malware/hacking
+        r'\b(keylogger|ransomware|trojan)\s+(code|script|implementation)',
+        r'\bdef\s+\w+\s*\(.*\):\s*#\s*(malware|virus|exploit)',
+        r'\bsql\s+injection\s+(payload|attack|code)',
+        
+        # Self-harm
+        r'\b(how\s+to\s+)?(kill|harm)\s+(yourself|myself)',
+        r'\bsuicide\s+(method|instruction|guide)',
+    ]
+    
+    for pattern in harmful_patterns:
+        if re.search(pattern, lower_text):
+            return True
+    
+    return False
+
+
+def contains_delimiter_leakage(text: str) -> bool:
+    """
+    Check if the output contains quarantine delimiter names or boundaries.
+    
+    This catches cases where the model outputs information about its
+    internal structure that could help attackers.
+    """
+    lower_text = text.lower()
+    
+    # Patterns that indicate delimiter/boundary information leakage
+    delimiter_patterns = [
+        r'</?doc_[a-z0-9]+>',  # Nonce-based tags
+        r'</?document>',       # Static document tags
+        r'</?untrusted>',      # Untrusted tags
+        r'quarantine\s+tag',
+        r'delimiter\s+is\s+',
+        r'wrapped\s+in\s+<',
+        r'between\s+<\w+>\s+and\s+</\w+>',
+    ]
+    
+    for pattern in delimiter_patterns:
+        if re.search(pattern, lower_text):
+            return True
+    
+    return False
 
 
 def validate_json_output(text: str, trusted_context: dict[str, Any]) -> str:
@@ -273,7 +355,7 @@ def redact_sensitive_values(data: dict) -> dict:
 
 
 def extract_json(text: str) -> Optional[str]:
-    """Extract JSON from text, handling markdown code blocks and top-level arrays."""
+    """Extract JSON from text, handling markdown code blocks, nested objects, and arrays."""
     text = text.strip()
     
     # Handle markdown code blocks
@@ -290,18 +372,71 @@ def extract_json(text: str) -> Optional[str]:
             elif in_block:
                 json_lines.append(line)
         if json_lines:
-            return "\n".join(json_lines)
+            extracted = "\n".join(json_lines).strip()
+            # Validate it's actual JSON
+            if extracted.startswith("{") or extracted.startswith("["):
+                return extracted
     
-    # Try to find JSON object in text
-    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-    if match:
-        return match.group(0)
+    # Try to find balanced JSON object with nested braces
+    if "{" in text:
+        json_str = _extract_balanced_json(text, "{", "}")
+        if json_str:
+            return json_str
     
     # Support top-level JSON arrays (e.g. resume_downgrade rankings)
-    if text.startswith("["):
-        return text
+    if "[" in text:
+        json_str = _extract_balanced_json(text, "[", "]")
+        if json_str:
+            return json_str
     
-    return text if text.startswith("{") else None
+    # Last resort: return text if it looks like JSON
+    return text if (text.startswith("{") or text.startswith("[")) else None
+
+
+def _extract_balanced_json(text: str, open_char: str, close_char: str) -> Optional[str]:
+    """
+    Extract a balanced JSON structure from text.
+    
+    Handles nested objects/arrays by counting balanced braces/brackets.
+    """
+    start_idx = text.find(open_char)
+    if start_idx == -1:
+        return None
+    
+    depth = 0
+    in_string = False
+    escape_next = False
+    
+    for i, char in enumerate(text[start_idx:], start=start_idx):
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if char == '\\':
+            escape_next = True
+            continue
+        
+        if char == '"':
+            in_string = not in_string
+            continue
+        
+        if in_string:
+            continue
+        
+        if char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                json_str = text[start_idx:i + 1]
+                # Validate it's parseable
+                try:
+                    json.loads(json_str)
+                    return json_str
+                except json.JSONDecodeError:
+                    return None
+    
+    return None
 
 
 def extract_tool_names(task_description: str) -> list[str]:

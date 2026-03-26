@@ -32,7 +32,7 @@ from typing import Any, List
 
 from .config import SAFE_REFUSAL_MESSAGE, get_format_aware_refusal
 from .normalizer import canonicalize_input
-from .structural_analyzer import analyze_structure
+from .structural_analyzer import analyze_structure, compute_risk_score
 from .plausibility_analyzer import (
     analyze_plausibility,
     generate_batch_context,
@@ -116,6 +116,10 @@ class SecurityGateway:
                                 i, plausibility.flags, plausibility.risk_score
                             )
             
+            # === Phase 0.75: Compute structural risk score ===
+            structural_risk_score = compute_risk_score(structural_flags)
+            self._logger.info("Structural risk score: %.2f", structural_risk_score)
+            
             # === Pass 1: LLM Security Analysis ===
             task_summary = trusted_context.get("defender_task", "Process user request")[:200]
             
@@ -128,8 +132,11 @@ class SecurityGateway:
             
             risk_level = analysis_result.get("risk_level", "medium")
             threats = analysis_result.get("threats", [])
-            sanitized_input = analysis_result.get("sanitized_input", canonical_input)
             reasoning = analysis_result.get("reasoning", "")
+            
+            # IMPORTANT: Do NOT use sanitized_input from Pass 1 - it can be tricked
+            # Instead, always pass the canonicalized input to Pass 2
+            # The threat information is used to strengthen the Pass 2 prompt, not to modify the input
             
             self._logger.info(
                 "Security analysis: risk=%s, threats=%d, reasoning=%s",
@@ -138,26 +145,52 @@ class SecurityGateway:
                 reasoning[:100] if reasoning else "none",
             )
             
-            # For high-risk inputs, check if we should refuse entirely
+            # === Early refusal decision (defense in depth) ===
+            # Refuse if: (structural_risk > 0.6 AND LLM says high) OR structural_risk > 0.8
+            should_refuse_structural = (
+                (structural_risk_score > 0.6 and risk_level == "high") or
+                structural_risk_score > 0.8
+            )
+            
+            if should_refuse_structural:
+                self._logger.info(
+                    "Refusing based on structural risk (score=%.2f, llm_risk=%s)",
+                    structural_risk_score, risk_level
+                )
+                return get_format_aware_refusal(trusted_context)
+            
+            # Also check threat-based refusal (original logic)
             if risk_level == "high" and self._should_refuse(threats, trusted_context):
                 self._logger.info("High-risk input refused based on threat analysis")
                 return get_format_aware_refusal(trusted_context)
             
+            # === Determine effective risk level ===
+            # Elevate risk level if structural analysis indicates higher risk
+            effective_risk_level = risk_level
+            if structural_risk_score > 0.5 and risk_level == "low":
+                effective_risk_level = "medium"
+                self._logger.info("Elevated risk level from low to medium based on structural analysis")
+            elif structural_risk_score > 0.4 and risk_level == "medium":
+                effective_risk_level = "high"
+                self._logger.info("Elevated risk level from medium to high based on structural analysis")
+            
             # === Pass 2: LLM Task Execution ===
-            self._logger.info("Executing task with risk_level=%s", risk_level)
+            self._logger.info("Executing task with effective_risk_level=%s", effective_risk_level)
             
             # For comparative tasks, prepend batch context to help with outlier detection
-            enhanced_input = sanitized_input
+            # IMPORTANT: Use canonical_input, NOT the LLM's sanitized_input
+            enhanced_input = canonical_input
             if batch_context and is_comparative_task:
-                enhanced_input = f"{batch_context}\n\n---\n\n{sanitized_input}"
+                enhanced_input = f"{batch_context}\n\n---\n\n{canonical_input}"
                 self._logger.info("Added batch context to input for comparative task")
             
             raw_response = await execute_task(
                 trusted_context=trusted_context,
                 sanitized_input=enhanced_input,
-                risk_level=risk_level,
+                risk_level=effective_risk_level,
                 model=self._model,
                 structural_flags=structural_flags,  # For adaptive prompt strengthening
+                detected_threats=threats,  # Pass threats for additional warnings in Pass 2
             )
             
             # === Phase 3: Deterministic Output Validation ===
