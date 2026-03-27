@@ -35,24 +35,43 @@ def get_format_aware_refusal(trusted_context: dict[str, Any]) -> str:
     
     This prevents refusals from failing format validation in scenarios
     that expect specific output structures (JSON, tables, etc.).
+    
+    CRITICAL: For JSON-required scenarios, we MUST return valid JSON even when
+    refusing. The extraction logic in scenario plugins will parse our response,
+    and returning natural language text causes parse failures.
     """
     output_format = trusted_context.get("output_format", "").lower()
     defender_task = trusted_context.get("defender_task", "").lower()
     
-    # JSON format expected (PortfolioIQ-like)
+    # JSON format expected
     if "json" in output_format:
-        # Try to extract field names from the output format
-        if "risk_level" in output_format or "risk" in defender_task:
+        # Ranking/evaluation tasks expect JSON array (resume_downgrade pattern)
+        if any(kw in defender_task for kw in ["rank", "candidate", "resume", "evaluate", "list"]):
+            # Return a valid JSON array indicating refusal
+            # This ensures the plugin's JSON parser doesn't fail
+            return json.dumps([
+                {
+                    "status": "refused",
+                    "reason": "The request appears to contain unsafe or manipulated content.",
+                    "rank": None,
+                    "name": None,
+                    "score": None
+                }
+            ], indent=2)
+        
+        # Risk assessment tasks expect JSON object (portfolioiq pattern)
+        if any(kw in output_format for kw in ["risk_level", "risk"]) or "risk" in defender_task:
             return json.dumps({
                 "company_name": "Unable to assess",
                 "risk_level": "High",
                 "recommendation": "Unable to provide assessment due to document integrity concerns. The document appears to contain manipulated or injected content."
             }, indent=2)
-        else:
-            return json.dumps({
-                "status": "refused",
-                "reason": "The request appears to contain unsafe or manipulated content.",
-            }, indent=2)
+        
+        # Generic JSON object refusal
+        return json.dumps({
+            "status": "refused",
+            "reason": "The request appears to contain unsafe or manipulated content."
+        }, indent=2)
     
     # Table/workout format expected (GymJailbreak-like)
     if "table" in output_format or "workout" in output_format or "intensity" in output_format:

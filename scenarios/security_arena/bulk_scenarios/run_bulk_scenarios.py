@@ -11,6 +11,16 @@ Modes:
 Each run invokes:
     uv run agentbeats-run <toml>
 
+Local Ollama (recommended on a single machine): set repo-root `.env` (see `.env.example`
+  Profile B) or export:
+  OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+  OPENAI_API_KEY=ollama
+  ARENA_OLLAMA_MODEL=<tag from `ollama list`, e.g. llama3.2:3b>
+  uv run python .../run_bulk_scenarios.py --limit 3
+
+  --model <name> overrides ARENA_OLLAMA_MODEL and rewrites --model in each temp TOML
+  (generated TOMLs use openai/gpt-oss-20b otherwise).
+
 Runs can be parallelized with --workers N. Each worker uses a separate port set
 (9010/9020/9021/9022, 9110/9120/9121/9122, ...) so multiple agentbeats-run
 processes can run at once without port conflicts.
@@ -23,9 +33,9 @@ After running, generate the dashboard and open it in a browser:
     # then open: scenarios/security_arena/bulk_scenarios/dashboard.html
 
 Usage:
-    # Run all bulk (424) scenarios
+    # Run all bulk (424) scenarios (local Ollama: set OPENAI_* and ARENA_OLLAMA_MODEL; prefer --workers 1)
     uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py
-    uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --workers 8
+    uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --workers 2
 
     # Run only example scenarios (5 scenarios)
     uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --examples
@@ -38,14 +48,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -101,10 +114,20 @@ def ports_for_worker(worker_id: int) -> Tuple[int, int, int, int]:
     )
 
 
-def make_toml_for_worker(toml_path: Path, worker_id: int, temp_dir: Path) -> Path:
+# Default model string embedded in generated TOMLs (vLLM-style); replaced when using Ollama.
+_DEFAULT_TOML_MODEL = "openai/gpt-oss-20b"
+
+
+def make_toml_for_worker(
+    toml_path: Path,
+    worker_id: int,
+    temp_dir: Path,
+    model_override: Optional[str] = None,
+) -> Path:
     """
     Read the scenario TOML and write a copy with ports substituted for this worker.
-    Returns path to the temporary TOML file.
+    If model_override is set, replace each --model <...> in participant cmd lines
+    (so attacker/defender/normal_user use your Ollama tag).
     """
     text = toml_path.read_text(encoding="utf-8")
     orch, def_, att, norm = ports_for_worker(worker_id)
@@ -113,14 +136,27 @@ def make_toml_for_worker(toml_path: Path, worker_id: int, temp_dir: Path) -> Pat
     text = text.replace("9021", str(att))
     text = text.replace("9020", str(def_))
     text = text.replace("9010", str(orch))
+    if model_override:
+        quoted = shlex.quote(model_override)
+        # Token must not include the closing " on cmd lines. Using \S+ here eats that quote and
+        # produces invalid TOML (tomllib: Illegal character '\\n' near end of the broken string).
+        text = re.sub(r'--model\s+[^\s"]+', f"--model {quoted}", text)
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(
+            f"Invalid TOML after substitutions in {toml_path} (check --model / ARENA_OLLAMA_MODEL): {e}"
+        ) from e
     out = temp_dir / f"scenario_worker{worker_id}_{toml_path.name}"
     out.write_text(text, encoding="utf-8")
     return out
 
 
-def run_one(args: Tuple[Path, int, int], retries: int = 0) -> RunResult:
-    """Run a single scenario. args = (toml_path, worker_id, scenario_index). Retries on non-zero exit up to retries times."""
-    toml_path, worker_id, _ = args
+def run_one(
+    args: Tuple[Path, int, int, Optional[str]], retries: int = 0
+) -> RunResult:
+    """Run a single scenario. args = (toml_path, worker_id, scenario_index, model_override)."""
+    toml_path, worker_id, _, model_override = args
     slug = slug_from_toml(toml_path)
     scenario_results_dir = RESULTS_BASE / slug
     scenario_results_dir.mkdir(parents=True, exist_ok=True)
@@ -131,7 +167,9 @@ def run_one(args: Tuple[Path, int, int], retries: int = 0) -> RunResult:
     last_returncode = -1
     for attempt in range(retries + 1):
         with tempfile.TemporaryDirectory(prefix="bulk_scenario_") as temp_dir:
-            temp_toml = make_toml_for_worker(toml_path, worker_id, Path(temp_dir))
+            temp_toml = make_toml_for_worker(
+                toml_path, worker_id, Path(temp_dir), model_override=model_override
+            )
             cmd = ["uv", "run", "agentbeats-run", str(temp_toml)]
             proc = subprocess.run(cmd, env=env)
         last_returncode = proc.returncode
@@ -159,6 +197,15 @@ def run_dashboard() -> None:
 
 
 def main() -> None:
+    try:
+        from dotenv import load_dotenv
+
+        # parents[0]=bulk_scenarios, [1]=security_arena, [2]=scenarios, [3]=repo root
+        repo_root = Path(__file__).resolve().parents[3]
+        load_dotenv(repo_root / ".env")
+    except ImportError:
+        pass
+
     parser = argparse.ArgumentParser(description="Run scenario TOMLs (bulk or examples, optionally in parallel)")
     parser.add_argument(
         "--examples",
@@ -168,8 +215,19 @@ def main() -> None:
     parser.add_argument(
         "--workers",
         type=int,
-        default=8,
-        help="Number of scenarios to run in parallel (default 8). Each uses a separate port set.",
+        default=1,
+        help="Number of scenarios to run in parallel (default 1; use higher only if your LLM backend can take it). Each uses a separate port set.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Override LLM model for all participants in the temp TOML (attacker, defender, normal_user). "
+            "Default: env ARENA_OLLAMA_MODEL or OLLAMA_MODEL; if unset, TOML keeps %s."
+            % _DEFAULT_TOML_MODEL
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -193,6 +251,20 @@ def main() -> None:
     limit = args.limit
     retries = max(0, args.retries)
 
+    model_override: Optional[str] = args.model or os.environ.get(
+        "ARENA_OLLAMA_MODEL"
+    ) or os.environ.get("OLLAMA_MODEL")
+    if model_override:
+        print(
+            f"Using LLM model for all agents: {model_override!r} (Ollama tag or API model id)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"No --model / ARENA_OLLAMA_MODEL / OLLAMA_MODEL: leaving TOML model as {_DEFAULT_TOML_MODEL!r}",
+            file=sys.stderr,
+        )
+
     tomls = find_tomls(examples_only=args.examples)
     if not tomls:
         sys.exit(1)
@@ -208,8 +280,8 @@ def main() -> None:
 
     # Each task gets a worker_id so we don't exceed `workers` concurrent runs with same port set.
     # Worker i uses ports 9010+i*100, 9020+i*100, etc.
-    task_args: List[Tuple[Path, int, int]] = [
-        (path, i % workers, i) for i, path in enumerate(tomls)
+    task_args: List[Tuple[Path, int, int, Optional[str]]] = [
+        (path, i % workers, i, model_override) for i, path in enumerate(tomls)
     ]
 
     results: List[RunResult] = []

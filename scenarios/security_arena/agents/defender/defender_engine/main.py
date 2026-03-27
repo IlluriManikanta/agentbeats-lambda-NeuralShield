@@ -6,11 +6,16 @@ Implements a layered security architecture:
           ↓
     Phase 0: Deterministic Preprocessing
         - Input canonicalization (unicode, base64, HTML stripping)
+        - Source trust segmentation (internal vs external documents)
         - Structural analysis (detect instruction-like patterns)
           ↓
     Pass 1: LLM Security Analysis (1 API call)
         - Evaluate untrusted input for threats
         - Produce risk_level and sanitized_input
+          ↓
+    Graceful Degradation Decision
+        - If external doc is high-risk but internal docs are clean,
+          complete task with internal docs only
           ↓
     Pass 2: LLM Task Execution (1 API call)
         - Scenario-aware system prompt with instruction hierarchy
@@ -37,6 +42,24 @@ from .plausibility_analyzer import (
     analyze_plausibility,
     generate_batch_context,
     extract_claims,
+)
+from .segmenter import (
+    segment_input,
+    build_input_without_external,
+    compute_segment_risk_summary,
+    get_external_segments,
+    get_internal_segments,
+    Segment,
+)
+from .intent_classifier import (
+    classify_intent,
+    classify_segments,
+    get_intent_risk_adjustment,
+    IntentType,
+)
+from .consistency_validator import (
+    get_validation_for_task,
+    ValidationResult,
 )
 from .llm.llm_client import analyze_for_threats, execute_task
 from .logger import get_logger
@@ -82,10 +105,56 @@ class SecurityGateway:
             canonical_input = canonicalize_input(untrusted_input)
             self._logger.info("Canonicalized input (len=%d)", len(canonical_input))
             
+            # === Phase 0.25: Source Trust Segmentation ===
+            # Parse multi-document inputs and assign trust levels
+            segments = segment_input(canonical_input)
+            self._logger.info(
+                "Segmented input: %d segments (external=%d, internal=%d)",
+                len(segments),
+                len(get_external_segments(segments)),
+                len(get_internal_segments(segments)),
+            )
+            
             # Detect structural patterns that suggest injection attempts
             structural_flags = analyze_structure(canonical_input)
             if structural_flags:
                 self._logger.info("Structural flags detected: %s", structural_flags)
+            
+            # Analyze each segment separately for per-segment risk
+            segment_flags: dict[str, List[str]] = {}
+            for seg in segments:
+                seg_key = seg.doc_id or f"seg_{seg.start_idx}"
+                seg_struct_flags = analyze_structure(seg.content)
+                segment_flags[seg_key] = seg_struct_flags
+                if seg_struct_flags:
+                    self._logger.info(
+                        "Segment %s (%s) flags: %s",
+                        seg_key, seg.source_type, seg_struct_flags
+                    )
+            
+            # === Phase 0.35: Intent Classification ===
+            # Detect instructions/meta-claims embedded in data segments
+            segment_intents = classify_segments(segments, defender_task)
+            intent_risk_boost = 0.0
+            
+            for seg_key, intent_result in segment_intents.items():
+                if intent_result.primary_intent != IntentType.DATA:
+                    # Add intent flags to segment flags
+                    segment_flags[seg_key] = segment_flags.get(seg_key, []) + intent_result.flags
+                    structural_flags.extend(intent_result.flags)
+                    
+                    # Compute risk adjustment
+                    seg_risk_adj = get_intent_risk_adjustment(intent_result)
+                    intent_risk_boost = max(intent_risk_boost, seg_risk_adj)
+                    
+                    self._logger.info(
+                        "Segment %s intent: %s (conf=%.2f, flags=%s, risk_adj=%.2f)",
+                        seg_key,
+                        intent_result.primary_intent.value,
+                        intent_result.confidence,
+                        intent_result.flags[:3],  # Log first 3 flags
+                        seg_risk_adj,
+                    )
             
             # === Phase 0.5: Plausibility Analysis ===
             # For comparative tasks (ranking, rating), analyze for content manipulation
@@ -117,8 +186,13 @@ class SecurityGateway:
                             )
             
             # === Phase 0.75: Compute structural risk score ===
-            structural_risk_score = compute_risk_score(structural_flags)
-            self._logger.info("Structural risk score: %.2f", structural_risk_score)
+            base_structural_risk = compute_risk_score(structural_flags)
+            # Add intent-based risk boost (capped at 1.0)
+            structural_risk_score = min(1.0, base_structural_risk + intent_risk_boost)
+            self._logger.info(
+                "Structural risk score: %.2f (base=%.2f, intent_boost=%.2f)",
+                structural_risk_score, base_structural_risk, intent_risk_boost
+            )
             
             # === Pass 1: LLM Security Analysis ===
             task_summary = trusted_context.get("defender_task", "Process user request")[:200]
@@ -174,14 +248,61 @@ class SecurityGateway:
                 effective_risk_level = "high"
                 self._logger.info("Elevated risk level from medium to high based on structural analysis")
             
+            # === Graceful Degradation Decision ===
+            # For multi-document tasks: if external doc is risky but internal docs are clean,
+            # complete the task using only internal documents instead of refusing entirely
+            use_graceful_degradation = False
+            excluded_doc_warning = ""
+            
+            if len(segments) > 1 and is_comparative_task:
+                risk_summary = compute_segment_risk_summary(segments, segment_flags)
+                
+                self._logger.info(
+                    "Segment risk summary: external_high_risk=%s, internal_clean=%s, risky_docs=%s",
+                    risk_summary["external_high_risk"],
+                    risk_summary["internal_clean"],
+                    risk_summary["risky_doc_ids"],
+                )
+                
+                if risk_summary["external_high_risk"] and risk_summary["internal_clean"]:
+                    # External doc is suspicious but internal docs are clean
+                    # We can complete the task with internal docs only
+                    use_graceful_degradation = True
+                    risky_ids = risk_summary["risky_doc_ids"]
+                    
+                    if risky_ids:
+                        excluded_doc_warning = (
+                            f"Note: Document(s) {', '.join(risky_ids)} excluded from evaluation "
+                            "due to format/integrity concerns."
+                        )
+                    else:
+                        excluded_doc_warning = (
+                            "Note: One or more externally-uploaded documents were excluded from "
+                            "evaluation due to format/integrity concerns."
+                        )
+                    
+                    self._logger.info(
+                        "Using graceful degradation: excluding external docs %s",
+                        risky_ids or "[unidentified]"
+                    )
+            
             # === Pass 2: LLM Task Execution ===
             self._logger.info("Executing task with effective_risk_level=%s", effective_risk_level)
             
             # For comparative tasks, prepend batch context to help with outlier detection
             # IMPORTANT: Use canonical_input, NOT the LLM's sanitized_input
             enhanced_input = canonical_input
+            
+            # Apply graceful degradation: rebuild input without risky external segments
+            if use_graceful_degradation:
+                enhanced_input = build_input_without_external(segments, canonical_input)
+                self._logger.info(
+                    "Rebuilt input without external segments (new len=%d, was %d)",
+                    len(enhanced_input), len(canonical_input)
+                )
+            
             if batch_context and is_comparative_task:
-                enhanced_input = f"{batch_context}\n\n---\n\n{canonical_input}"
+                enhanced_input = f"{batch_context}\n\n---\n\n{enhanced_input}"
                 self._logger.info("Added batch context to input for comparative task")
             
             raw_response = await execute_task(
@@ -193,15 +314,52 @@ class SecurityGateway:
                 detected_threats=threats,  # Pass threats for additional warnings in Pass 2
             )
             
+            # === Phase 2.5: Output Consistency Validation ===
+            # Validate that ranking outputs include all input documents
+            validation_result = get_validation_for_task(
+                raw_response,
+                trusted_context,
+                segments=segments if len(segments) > 1 else None,
+            )
+            
+            if not validation_result.is_valid:
+                self._logger.warning(
+                    "Output validation failed: missing=%s, errors=%s",
+                    validation_result.missing_items,
+                    validation_result.format_errors,
+                )
+                
+                # If we have LLM calls remaining (used 2 of 4), we could retry
+                # For now, we log the issue but don't retry to stay within budget
+                # Future enhancement: use 3rd call for retry with explicit coverage request
+            
+            if validation_result.warnings:
+                self._logger.info(
+                    "Output validation warnings: %s",
+                    validation_result.warnings,
+                )
+            
             # === Phase 3: Deterministic Output Validation ===
             final_response = sanitize_output(
                 raw_response,
                 trusted_context=trusted_context,
             )
             
+            # Append excluded document warning if graceful degradation was used
+            if use_graceful_degradation and excluded_doc_warning:
+                output_format = trusted_context.get("output_format", "").lower()
+                if "json" in output_format:
+                    # For JSON output, we don't append text - the response should be valid JSON
+                    # The warning is only logged, not included in output
+                    self._logger.info("Graceful degradation warning (not appended to JSON): %s", excluded_doc_warning)
+                else:
+                    # For non-JSON output, append the warning
+                    final_response = f"{final_response}\n\n{excluded_doc_warning}"
+            
             self._logger.info(
-                "Pipeline complete: LLM calls=2, response len=%d",
+                "Pipeline complete: LLM calls=2, response len=%d, graceful_degradation=%s",
                 len(final_response),
+                use_graceful_degradation,
             )
             return final_response
 

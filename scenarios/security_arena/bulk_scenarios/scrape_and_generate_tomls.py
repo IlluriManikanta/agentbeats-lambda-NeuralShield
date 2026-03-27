@@ -5,13 +5,12 @@ generate local scenario TOML files that mirror the existing Security Arena
 scenario config pattern.
 
 IMPORTANT:
-- These generated TOMLs will only be runnable for scenario_type values
-  that have corresponding ScenarioPlugin implementations registered in
-  scenarios/security_arena/plugins/registry.py.
-- Today, that registry only supports:
-    portfolioiq, thingularity, medical_records, resume_downgrade, gymjailbreak
-  All other generated TOMLs will cause agentbeats-run to fail with
-  "Unknown scenario type" until you implement and register plugins.
+- Canonical (faithful) ScenarioPlugins are registered in:
+  scenarios/security_arena/plugins/registry.py
+  (portfolioiq, thingularity, medical_records, resume_downgrade, gymjailbreak).
+- Unknown slugs (most generated TOMLs) load GenericLocalEvalPlugin by default
+  (see SECURITY_ARENA_ALLOW_FALLBACK_PLUGINS). That path is for local approximate
+  evaluation; see bulk_scenarios/README.md.
 
 Usage:
     uv run python scenarios/security_arena/bulk_scenarios/scrape_and_generate_tomls.py

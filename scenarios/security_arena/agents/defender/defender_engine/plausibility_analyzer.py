@@ -6,16 +6,22 @@ without using obvious injection syntax.
 
 Key capabilities:
 1. Extract quantitative claims (years of experience, team sizes, etc.)
-2. Detect statistical outliers within batch contexts
+2. Detect statistical outliers within batch contexts using Z-scores
 3. Flag implausible credentials or achievements
 4. Provide comparative context for evaluation tasks
+
+Z-Score Detection:
+- Uses standard deviation to detect outliers
+- Flag at 2 sigma for moderate suspicion
+- Flag at 3 sigma for high suspicion (likely manipulation)
 """
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 
 @dataclass
@@ -221,48 +227,166 @@ def analyze_plausibility(
     return flags
 
 
+def compute_z_score(value: float, values: List[float]) -> float:
+    """
+    Compute the Z-score of a value relative to a distribution.
+    
+    Z-score = (value - mean) / std_dev
+    
+    Args:
+        value: The value to compute Z-score for
+        values: The distribution to compare against
+        
+    Returns:
+        Z-score (positive if above mean, negative if below)
+        Returns 0 if standard deviation is 0 (all values same)
+    """
+    if not values:
+        return 0.0
+    
+    n = len(values)
+    mean = sum(values) / n
+    
+    if n < 2:
+        return 0.0
+    
+    variance = sum((x - mean) ** 2 for x in values) / (n - 1)
+    std_dev = math.sqrt(variance) if variance > 0 else 0
+    
+    if std_dev == 0:
+        return 0.0
+    
+    return (value - mean) / std_dev
+
+
+def compute_outlier_scores(claims: ExtractedClaims, batch_claims: List[ExtractedClaims]) -> Dict[str, float]:
+    """
+    Compute Z-scores for all metrics comparing one document to the batch.
+    
+    Args:
+        claims: The document's extracted claims
+        batch_claims: Claims from comparison documents
+        
+    Returns:
+        Dict mapping metric name to Z-score
+    """
+    scores = {}
+    
+    if not batch_claims:
+        return scores
+    
+    # Gather all values including the target for distribution
+    all_with_target = batch_claims + [claims]
+    
+    # Experience Z-score (use max experience if multiple)
+    all_exp_values = [max(bc.years_experience) if bc.years_experience else 0 for bc in all_with_target]
+    target_exp = max(claims.years_experience) if claims.years_experience else 0
+    if any(v > 0 for v in all_exp_values):
+        scores['experience_zscore'] = compute_z_score(target_exp, all_exp_values[:-1])
+    
+    # Team size Z-score (use max team size)
+    all_team_values = [max(bc.team_sizes) if bc.team_sizes else 0 for bc in all_with_target]
+    target_team = max(claims.team_sizes) if claims.team_sizes else 0
+    if any(v > 0 for v in all_team_values):
+        scores['team_size_zscore'] = compute_z_score(target_team, all_team_values[:-1])
+    
+    # Award count Z-score
+    all_award_values = [bc.award_count for bc in all_with_target]
+    if any(v > 0 for v in all_award_values):
+        scores['awards_zscore'] = compute_z_score(claims.award_count, all_award_values[:-1])
+    
+    # Superlative count Z-score
+    all_super_values = [bc.superlative_count for bc in all_with_target]
+    if any(v > 0 for v in all_super_values):
+        scores['superlatives_zscore'] = compute_z_score(claims.superlative_count, all_super_values[:-1])
+    
+    # Document length Z-score
+    all_len_values = [bc.document_length for bc in all_with_target]
+    if any(v > 0 for v in all_len_values):
+        scores['length_zscore'] = compute_z_score(claims.document_length, all_len_values[:-1])
+    
+    # Prestige institution count Z-score
+    all_prestige_values = [len(bc.prestigious_institutions) for bc in all_with_target]
+    if any(v > 0 for v in all_prestige_values):
+        scores['prestige_zscore'] = compute_z_score(
+            len(claims.prestigious_institutions), 
+            all_prestige_values[:-1]
+        )
+    
+    return scores
+
+
 def _compare_to_batch(claims: ExtractedClaims, batch_claims: List[ExtractedClaims]) -> List[str]:
-    """Compare claims against a batch to detect outliers."""
+    """
+    Compare claims against a batch using Z-score based outlier detection.
+    
+    Uses standard deviation to detect statistical outliers:
+    - Z-score > 2: Moderate outlier (flagged)
+    - Z-score > 3: Extreme outlier (high suspicion)
+    """
     flags = []
     
     if not batch_claims:
         return flags
     
-    # Calculate batch statistics for experience
-    all_experience = []
-    for bc in batch_claims:
-        all_experience.extend(bc.years_experience)
+    # Compute Z-scores for all metrics
+    z_scores = compute_outlier_scores(claims, batch_claims)
     
-    if all_experience and claims.years_experience:
-        avg_exp = sum(all_experience) / len(all_experience)
-        max_claim_exp = max(claims.years_experience)
-        if max_claim_exp > avg_exp * 2:
-            flags.append('EXPERIENCE_OUTLIER')
-        if max_claim_exp > avg_exp * 3:
-            flags.append('STATISTICAL_OUTLIER')
+    # Flag based on Z-score thresholds
+    high_z_threshold = 3.0  # 3 sigma - extreme outlier
+    moderate_z_threshold = 2.0  # 2 sigma - moderate outlier
     
-    # Calculate batch statistics for team sizes
-    all_teams = []
-    for bc in batch_claims:
-        all_teams.extend(bc.team_sizes)
+    # Experience outlier
+    exp_z = z_scores.get('experience_zscore', 0)
+    if exp_z > high_z_threshold:
+        flags.append('EXPERIENCE_EXTREME_OUTLIER')
+        flags.append('Z_SCORE_ANOMALY')
+    elif exp_z > moderate_z_threshold:
+        flags.append('EXPERIENCE_OUTLIER')
     
-    if all_teams and claims.team_sizes:
-        avg_team = sum(all_teams) / len(all_teams)
-        max_claim_team = max(claims.team_sizes)
-        if max_claim_team > avg_team * 3:
-            flags.append('STATISTICAL_OUTLIER')
+    # Team size outlier
+    team_z = z_scores.get('team_size_zscore', 0)
+    if team_z > high_z_threshold:
+        flags.append('TEAM_SIZE_EXTREME_OUTLIER')
+        flags.append('Z_SCORE_ANOMALY')
+    elif team_z > moderate_z_threshold:
+        flags.append('STATISTICAL_OUTLIER')
     
-    # Compare document length
-    avg_length = sum(bc.document_length for bc in batch_claims) / len(batch_claims)
-    if claims.document_length > avg_length * 2:
-        flags.append('DOCUMENT_LENGTH_OUTLIER')
-    
-    # Compare award density
-    avg_awards = sum(bc.award_count for bc in batch_claims) / len(batch_claims)
-    if claims.award_count > avg_awards * 3 and claims.award_count > 2:
+    # Award count outlier
+    award_z = z_scores.get('awards_zscore', 0)
+    if award_z > high_z_threshold:
+        flags.append('AWARD_EXTREME_OUTLIER')
+        flags.append('Z_SCORE_ANOMALY')
+    elif award_z > moderate_z_threshold:
         flags.append('AWARD_DENSITY_HIGH')
     
-    return flags
+    # Superlative count outlier
+    super_z = z_scores.get('superlatives_zscore', 0)
+    if super_z > high_z_threshold:
+        flags.append('SUPERLATIVE_EXTREME_OUTLIER')
+    elif super_z > moderate_z_threshold:
+        flags.append('EXCESSIVE_SUPERLATIVES')
+    
+    # Document length outlier
+    len_z = z_scores.get('length_zscore', 0)
+    if len_z > high_z_threshold:
+        flags.append('LENGTH_EXTREME_OUTLIER')
+    elif len_z > moderate_z_threshold:
+        flags.append('DOCUMENT_LENGTH_OUTLIER')
+    
+    # Prestige name-dropping outlier
+    prestige_z = z_scores.get('prestige_zscore', 0)
+    if prestige_z > high_z_threshold:
+        flags.append('PRESTIGE_EXTREME_OUTLIER')
+    elif prestige_z > moderate_z_threshold:
+        flags.append('PRESTIGE_NAME_DROPPING')
+    
+    # Composite check: if multiple moderate outliers, it's suspicious
+    moderate_outlier_count = sum(1 for z in z_scores.values() if z > moderate_z_threshold)
+    if moderate_outlier_count >= 3:
+        flags.append('MULTI_METRIC_OUTLIER')
+    
+    return list(set(flags))  # Remove duplicates
 
 
 def generate_batch_context(texts: List[str]) -> str:
@@ -332,6 +456,8 @@ def detect_outlier_document(
     """
     Determine if a target document is a statistical outlier compared to batch.
     
+    Uses Z-score analysis to detect documents that are statistically anomalous.
+    
     Args:
         target_text: The document to check
         batch_texts: Other documents for comparison
@@ -342,17 +468,36 @@ def detect_outlier_document(
     target_claims = extract_claims(target_text)
     batch_claims = [extract_claims(t) for t in batch_texts]
     
+    # Z-score based comparison
+    z_scores = compute_outlier_scores(target_claims, batch_claims)
     flags = _compare_to_batch(target_claims, batch_claims)
     
     # Also run absolute plausibility check
     abs_flags = analyze_plausibility(target_text)
     all_flags = list(set(flags + abs_flags.flags))
     
-    is_outlier = len(all_flags) >= 2 or abs_flags.risk_score > 0.5
+    # Determine if outlier based on Z-scores and flag count
+    has_extreme_z = any(z > 3.0 for z in z_scores.values())
+    has_multiple_moderate_z = sum(1 for z in z_scores.values() if z > 2.0) >= 2
+    
+    is_outlier = (
+        has_extreme_z or 
+        has_multiple_moderate_z or 
+        len(all_flags) >= 3 or 
+        abs_flags.risk_score > 0.5
+    )
     
     if is_outlier:
+        # Build explanation with Z-score details
+        z_details = []
+        for metric, z in sorted(z_scores.items(), key=lambda x: -x[1]):
+            if z > 2.0:
+                z_details.append(f"{metric}={z:.1f}σ")
+        
+        z_summary = ", ".join(z_details[:3]) if z_details else "N/A"
         explanation = (
             f"Document shows {len(all_flags)} anomaly indicators. "
+            f"Z-scores: {z_summary}. "
             f"Risk score: {abs_flags.risk_score:.2f}. "
             f"Flags: {', '.join(all_flags[:5])}"
         )
@@ -360,3 +505,29 @@ def detect_outlier_document(
         explanation = "Document appears within normal range for this batch."
     
     return is_outlier, all_flags, explanation
+
+
+def get_batch_z_score_summary(texts: List[str]) -> Dict[int, Dict[str, float]]:
+    """
+    Compute Z-scores for all documents in a batch relative to each other.
+    
+    Useful for identifying which document(s) in a set are potential outliers.
+    
+    Args:
+        texts: List of document texts
+        
+    Returns:
+        Dict mapping document index to its Z-scores dict
+    """
+    if len(texts) < 3:
+        return {}
+    
+    all_claims = [extract_claims(t) for t in texts]
+    result = {}
+    
+    for i, claims in enumerate(all_claims):
+        # Compare this document to all others
+        other_claims = all_claims[:i] + all_claims[i+1:]
+        result[i] = compute_outlier_scores(claims, other_claims)
+    
+    return result
