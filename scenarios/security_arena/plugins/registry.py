@@ -14,6 +14,7 @@ from .thingularity import ThingularityPlugin
 from .example_medical import MedicalRecordsPlugin
 from .resume_downgrade import ResumeDowngradePlugin
 from .gymjailbreak import GymJailbreakPlugin
+from .scraped import create_plugin_for_slug
 
 
 # Registry mapping scenario names to plugin classes
@@ -52,14 +53,20 @@ def load_scenario(scenario_type: str, config: dict[str, Any]) -> ScenarioPlugin:
     """
     plugin_class = SCENARIO_PLUGINS.get(scenario_type)
 
-    if not plugin_class:
-        available = ", ".join(SCENARIO_PLUGINS.keys())
-        raise ValueError(
-            f"Unknown scenario type: '{scenario_type}'. "
-            f"Available scenarios: {available}"
-        )
+    if plugin_class:
+        return plugin_class(config)
 
-    return plugin_class(config)
+    # Fallback: if we have scraped metadata for this slug, build a
+    # scenario-specific plugin instance from the scraped folder.
+    scraped = create_plugin_for_slug(scenario_type, config)
+    if scraped is not None:
+        return scraped
+
+    available = ", ".join(SCENARIO_PLUGINS.keys())
+    raise ValueError(
+        f"Unknown scenario type: '{scenario_type}'. "
+        f"Available core scenarios: {available}"
+    )
 
 
 def list_scenarios() -> list[str]:
