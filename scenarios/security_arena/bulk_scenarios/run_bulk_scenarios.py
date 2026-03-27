@@ -5,8 +5,10 @@ Run scenario TOML files and store results in bulk_scenarios/results/<slug>.
 Modes:
   - **Bulk (default):** Run all auto-generated scenarios from generated_tomls/
     (e.g. 424 scenarios). Requires running scrape_and_generate_tomls.py first.
-  - **Examples:** Run only the example scenarios (medical_records, thingularity,
-    gymjailbreak, resume_downgrade, portfolioiq) from scenarios/security_arena/.
+  - **Examples:** Run all example scenarios from scenarios/security_arena/
+    (scenario_medical_example.toml, scenario_thingularity.toml, …) — **not** generated bulk.
+  - **Subset:** `--only medical_example gymjailbreak` runs just those two TOMLs from
+    scenarios/security_arena/.
 
 Each run invokes:
     uv run agentbeats-run <toml>
@@ -19,19 +21,29 @@ Results are written to:
     scenarios/security_arena/bulk_scenarios/results/<slug>
 
 After running, generate the dashboard and open it in a browser:
-    uv run python scenarios/security_arena/bulk_scenarios/dashboard.py
-    # then open: scenarios/security_arena/bulk_scenarios/dashboard.html
+    uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --examples --open
+    # or: uv run python scenarios/security_arena/bulk_scenarios/arena_report.py
 
 Usage:
     # Run all bulk (424) scenarios
     uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py
     uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --workers 8
 
-    # Run only example scenarios (5 scenarios)
+    # Run all example TOMLs under scenarios/security_arena/ (not generated bulk)
     uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --examples
 
-    # Run examples then build dashboard
-    uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --examples --dashboard
+    # Run only specific examples (slugs = filename without scenario_ prefix)
+    uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --only medical_example gymjailbreak
+
+    # Run the same scenario set 3 times (results under results/<slug>/repeat_001..003/)
+    uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --examples --repeat 3
+
+    # Run examples, build dashboard, open browser (one step)
+    uv run python scenarios/security_arena/bulk_scenarios/run_bulk_scenarios.py --examples --open
+
+    # Or use the convenience wrapper (same as --examples --open; add --only … as needed)
+    uv run python scenarios/security_arena/bulk_scenarios/arena_report.py
+    uv run python scenarios/security_arena/bulk_scenarios/arena_report.py --only medical_example gymjailbreak
 """
 
 from __future__ import annotations
@@ -67,6 +79,19 @@ class RunResult:
     toml_path: Path
     returncode: int
     worker_id: int
+
+
+def resolve_example_tomls_only(slugs: List[str]) -> List[Path]:
+    """Paths to scenario_<slug>.toml under ARENA_DIR; exit with error if any missing."""
+    paths: List[Path] = []
+    for slug in slugs:
+        p = ARENA_DIR / f"scenario_{slug}.toml"
+        if not p.is_file():
+            print(f"ERROR: Example scenario not found: {p}", file=sys.stderr)
+            print(f"  (expected slug '{slug}' → scenario_{slug}.toml under {ARENA_DIR})", file=sys.stderr)
+            sys.exit(1)
+        paths.append(p)
+    return sorted(paths, key=lambda x: x.name)
 
 
 def find_tomls(examples_only: bool = False) -> List[Path]:
@@ -118,17 +143,21 @@ def make_toml_for_worker(toml_path: Path, worker_id: int, temp_dir: Path) -> Pat
     return out
 
 
-def run_one(args: Tuple[Path, int, int], retries: int = 0) -> RunResult:
-    """Run a single scenario. args = (toml_path, worker_id, scenario_index). Retries on non-zero exit up to retries times."""
-    toml_path, worker_id, _ = args
+def run_one(args: Tuple[Path, int, int, int, int], retries: int = 0) -> RunResult:
+    """Run a single scenario. args = (toml_path, worker_id, scenario_index, trial_num, total_repeats)."""
+    toml_path, worker_id, _, trial_num, total_repeats = args
     slug = slug_from_toml(toml_path)
-    scenario_results_dir = RESULTS_BASE / slug
+    if total_repeats <= 1:
+        scenario_results_dir = RESULTS_BASE / slug
+    else:
+        scenario_results_dir = RESULTS_BASE / slug / f"repeat_{trial_num:03d}"
     scenario_results_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env["AGENTBEATS_RESULTS_DIR"] = str(scenario_results_dir)
 
     last_returncode = -1
+    trial_tag = f" trial {trial_num}/{total_repeats}" if total_repeats > 1 else ""
     for attempt in range(retries + 1):
         with tempfile.TemporaryDirectory(prefix="bulk_scenario_") as temp_dir:
             temp_toml = make_toml_for_worker(toml_path, worker_id, Path(temp_dir))
@@ -139,22 +168,28 @@ def run_one(args: Tuple[Path, int, int], retries: int = 0) -> RunResult:
             break
         if attempt < retries:
             time.sleep(5)
-            print(f"[w{worker_id}] {slug}: exit {proc.returncode}, retrying ({attempt + 2}/{retries + 1})...", file=sys.stderr)
+            print(
+                f"[w{worker_id}] {slug}{trial_tag}: exit {proc.returncode}, retrying ({attempt + 2}/{retries + 1})...",
+                file=sys.stderr,
+            )
 
-    print(f"[w{worker_id}] {slug}: exit {last_returncode}", file=sys.stderr)
+    print(f"[w{worker_id}] {slug}{trial_tag}: exit {last_returncode}", file=sys.stderr)
     return RunResult(slug=slug, toml_path=toml_path, returncode=last_returncode, worker_id=worker_id)
 
 
-def run_dashboard() -> None:
-    """Generate dashboard.html from results in RESULTS_BASE."""
+def run_dashboard(open_browser: bool = False) -> None:
+    """Generate dashboard.html from results in RESULTS_BASE; optionally open in browser."""
     dashboard_script = BASE_DIR / "dashboard.py"
     if not dashboard_script.exists():
         print(f"Dashboard script not found: {dashboard_script}", file=sys.stderr)
         return
-    proc = subprocess.run([sys.executable, str(dashboard_script)], cwd=str(BASE_DIR))
-    if proc.returncode == 0:
+    cmd = [sys.executable, str(dashboard_script)]
+    if open_browser:
+        cmd.append("--open")
+    proc = subprocess.run(cmd, cwd=str(BASE_DIR))
+    if proc.returncode == 0 and not open_browser:
         print(f"Dashboard written to {BASE_DIR / 'dashboard.html'}. Open it in a browser.", file=sys.stderr)
-    else:
+    elif proc.returncode != 0:
         print(f"Dashboard script exited with {proc.returncode}", file=sys.stderr)
 
 
@@ -163,7 +198,14 @@ def main() -> None:
     parser.add_argument(
         "--examples",
         action="store_true",
-        help="Run only example scenarios (medical_example, thingularity, gymjailbreak, resume_downgrade, portfolioiq) from scenarios/security_arena/. Default: run bulk scenarios from generated_tomls/.",
+        help="Run every scenario_*.toml in scenarios/security_arena/ (the hand-written examples). Default without --examples/--only: run bulk scenarios from generated_tomls/.",
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        metavar="SLUG",
+        default=None,
+        help="Run only these example scenarios: slugs are the TOML name without 'scenario_' and '.toml', e.g. medical_example gymjailbreak thingularity. Uses files under scenarios/security_arena/ only (not generated bulk).",
     )
     parser.add_argument(
         "--workers",
@@ -188,12 +230,33 @@ def main() -> None:
         action="store_true",
         help="After running scenarios, generate dashboard.html from results (run dashboard.py).",
     )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="After runs, regenerate dashboard and open it in the default browser (implies --dashboard).",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run the full selected scenario set N times in sequence (default 1). Results go to "
+        "results/<slug>/repeat_001/… for N>1; dashboard aggregates trials per slug.",
+    )
     args = parser.parse_args()
+    if args.open:
+        args.dashboard = True
+    if args.only is not None and args.examples:
+        print("NOTE: --only takes precedence; ignoring --examples.", file=sys.stderr)
+
     workers = max(1, args.workers)
     limit = args.limit
     retries = max(0, args.retries)
 
-    tomls = find_tomls(examples_only=args.examples)
+    if args.only is not None:
+        tomls = resolve_example_tomls_only(args.only)
+    else:
+        tomls = find_tomls(examples_only=args.examples)
     if not tomls:
         sys.exit(1)
 
@@ -203,26 +266,36 @@ def main() -> None:
     if total == 0:
         sys.exit(1)
 
-    mode = "example" if args.examples else "bulk"
+    if args.only is not None:
+        mode = "example (subset)"
+    elif args.examples:
+        mode = "example (all)"
+    else:
+        mode = "bulk"
+    repeats = max(1, args.repeat)
+    if repeats > 1:
+        mode = f"{mode} × {repeats} trials"
     print(f"Running {total} {mode} scenario(s) with {workers} parallel worker(s)...", file=sys.stderr)
 
-    # Each task gets a worker_id so we don't exceed `workers` concurrent runs with same port set.
-    # Worker i uses ports 9010+i*100, 9020+i*100, etc.
-    task_args: List[Tuple[Path, int, int]] = [
-        (path, i % workers, i) for i, path in enumerate(tomls)
-    ]
-
     results: List[RunResult] = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(run_one, a, retries): a for a in task_args}
-        for fut in as_completed(futures):
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                a = futures[fut]
-                slug = slug_from_toml(a[0])
-                print(f"Scenario '{slug}' raised: {e}", file=sys.stderr)
-                results.append(RunResult(slug=slug, toml_path=a[0], returncode=-1, worker_id=a[1]))
+    for trial in range(1, repeats + 1):
+        if repeats > 1:
+            print(f"\n--- Trial {trial}/{repeats} (full scenario set) ---", file=sys.stderr)
+        # Each task gets a worker_id so we don't exceed `workers` concurrent runs with same port set.
+        task_args: List[Tuple[Path, int, int, int, int]] = [
+            (path, i % workers, i, trial, repeats) for i, path in enumerate(tomls)
+        ]
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(run_one, a, retries): a for a in task_args}
+            for fut in as_completed(futures):
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    a = futures[fut]
+                    slug = slug_from_toml(a[0])
+                    print(f"Scenario '{slug}' raised: {e}", file=sys.stderr)
+                    results.append(RunResult(slug=slug, toml_path=a[0], returncode=-1, worker_id=a[1]))
 
     # Sort by slug for stable summary
     results.sort(key=lambda r: r.slug)
@@ -242,7 +315,7 @@ def main() -> None:
 
     if args.dashboard:
         print("", file=sys.stderr)
-        run_dashboard()
+        run_dashboard(open_browser=args.open)
 
 
 if __name__ == "__main__":
