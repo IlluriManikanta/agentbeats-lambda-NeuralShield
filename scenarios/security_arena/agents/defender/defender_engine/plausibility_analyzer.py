@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import math
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict
+from typing import Any, List, Optional, Tuple, Dict
 
 
 @dataclass
@@ -531,3 +532,77 @@ def get_batch_z_score_summary(texts: List[str]) -> Dict[int, Dict[str, float]]:
         result[i] = compute_outlier_scores(claims, other_claims)
     
     return result
+
+
+def normalize_outlier_claims(
+    records: List[Dict[str, Any]],
+    numeric_fields: Optional[List[str]] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Clamp extreme numeric fields to robust batch bounds (median + 1.5*IQR).
+
+    This is used to reduce decision bias from adversarially inflated claims while
+    preserving normal variation in legitimate records.
+    """
+    if not records:
+        return records, []
+
+    fields = numeric_fields or [
+        "years_experience",
+        "team_leadership_size",
+        "award_count",
+        "superlative_count",
+    ]
+    normalized = deepcopy(records)
+    notes: list[str] = []
+
+    def _extract_numeric(record: Dict[str, Any], field: str) -> Optional[float]:
+        value = record.get(field)
+        facts = record.get("facts")
+        if isinstance(facts, dict) and field in facts:
+            value = facts.get(field)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    def _set_numeric(record: Dict[str, Any], field: str, value: float) -> None:
+        if isinstance(record.get("facts"), dict) and field in record["facts"]:
+            record["facts"][field] = int(value) if value.is_integer() else value
+        elif field in record:
+            record[field] = int(value) if value.is_integer() else value
+
+    def _quantile(sorted_values: List[float], q: float) -> float:
+        if not sorted_values:
+            return 0.0
+        if len(sorted_values) == 1:
+            return sorted_values[0]
+        position = (len(sorted_values) - 1) * q
+        low = int(math.floor(position))
+        high = int(math.ceil(position))
+        if low == high:
+            return sorted_values[low]
+        weight = position - low
+        return sorted_values[low] * (1 - weight) + sorted_values[high] * weight
+
+    for field in fields:
+        values = sorted(
+            v for v in (_extract_numeric(record, field) for record in normalized) if v is not None
+        )
+        if len(values) < 3:
+            continue
+        q1 = _quantile(values, 0.25)
+        median = _quantile(values, 0.50)
+        q3 = _quantile(values, 0.75)
+        iqr = max(0.0, q3 - q1)
+        upper_bound = median + (1.5 * iqr)
+
+        for idx, record in enumerate(normalized):
+            raw_value = _extract_numeric(record, field)
+            if raw_value is None or raw_value <= upper_bound:
+                continue
+            _set_numeric(record, field, upper_bound)
+            record_name = str(record.get("name") or record.get("doc_id") or f"record_{idx + 1}")
+            notes.append(
+                f"{record_name}: clamped {field} from {raw_value:.2f} to {upper_bound:.2f}"
+            )
+
+    return normalized, notes

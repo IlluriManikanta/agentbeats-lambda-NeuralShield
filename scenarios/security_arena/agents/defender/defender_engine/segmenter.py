@@ -379,7 +379,7 @@ def compute_segment_risk_summary(
         doc_key = seg.doc_id or f"seg_{seg.start_idx}"
         flags = segment_flags.get(doc_key, [])
         risk_score = compute_risk_score(flags)
-        if risk_score > 0.5:
+        if risk_score >= 0.35:
             external_high_risk = True
             if seg.doc_id:
                 risky_doc_ids.append(seg.doc_id)

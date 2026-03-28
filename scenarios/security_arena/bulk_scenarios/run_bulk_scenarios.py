@@ -50,6 +50,7 @@ import argparse
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,56 @@ def ports_for_worker(worker_id: int) -> Tuple[int, int, int, int]:
     )
 
 
+def ports_for_worker_with_offset(
+    worker_id: int,
+    run_port_offset: int,
+) -> Tuple[int, int, int, int]:
+    """Return worker ports shifted by a run-specific offset."""
+    orch, def_, att, norm = ports_for_worker(worker_id)
+    return (orch + run_port_offset, def_ + run_port_offset, att + run_port_offset, norm + run_port_offset)
+
+
+def _can_bind(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True when the TCP port is currently available on host."""
+    if port < 1 or port > 65535:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def choose_run_port_offset(workers: int, explicit_offset: Optional[int]) -> int:
+    """
+    Pick a run-specific port offset that keeps this bulk run isolated from
+    other overlapping runs on the same machine.
+    """
+    if explicit_offset is not None:
+        return explicit_offset
+
+    # Spread candidates across high user ports; PID-derived start reduces collision
+    # when two bulk runs are launched close together.
+    slot_step = 1000
+    max_slot = 50  # up to ~59010 base for worker 0 orchestrator
+    start_slot = os.getpid() % (max_slot + 1)
+    candidate_offsets = [((start_slot + i) % (max_slot + 1)) * slot_step for i in range(max_slot + 1)]
+
+    for offset in candidate_offsets:
+        required_ports: set[int] = set()
+        for worker_id in range(workers):
+            required_ports.update(ports_for_worker_with_offset(worker_id, offset))
+        if all(_can_bind(port) for port in required_ports):
+            return offset
+
+    raise RuntimeError(
+        "Unable to find a free port range for this bulk run. "
+        "Close other local scenario runs or pass --port-offset explicitly."
+    )
+
+
 # Default model string embedded in generated TOMLs (vLLM-style); replaced when using Ollama.
 _DEFAULT_TOML_MODEL = "openai/gpt-oss-20b"
 
@@ -123,6 +174,7 @@ def make_toml_for_worker(
     worker_id: int,
     temp_dir: Path,
     model_override: Optional[str] = None,
+    run_port_offset: int = 0,
 ) -> Path:
     """
     Read the scenario TOML and write a copy with ports substituted for this worker.
@@ -130,7 +182,7 @@ def make_toml_for_worker(
     (so attacker/defender/normal_user use your Ollama tag).
     """
     text = toml_path.read_text(encoding="utf-8")
-    orch, def_, att, norm = ports_for_worker(worker_id)
+    orch, def_, att, norm = ports_for_worker_with_offset(worker_id, run_port_offset)
     # Replace default ports with worker-specific ones (order: longest first to avoid partial matches)
     text = text.replace("9022", str(norm))
     text = text.replace("9021", str(att))
@@ -153,10 +205,10 @@ def make_toml_for_worker(
 
 
 def run_one(
-    args: Tuple[Path, int, int, Optional[str]], retries: int = 0
+    args: Tuple[Path, int, int, Optional[str], int], retries: int = 0
 ) -> RunResult:
-    """Run a single scenario. args = (toml_path, worker_id, scenario_index, model_override)."""
-    toml_path, worker_id, _, model_override = args
+    """Run a single scenario. args = (toml_path, worker_id, scenario_index, model_override, run_port_offset)."""
+    toml_path, worker_id, _, model_override, run_port_offset = args
     slug = slug_from_toml(toml_path)
     scenario_results_dir = RESULTS_BASE / slug
     scenario_results_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +220,11 @@ def run_one(
     for attempt in range(retries + 1):
         with tempfile.TemporaryDirectory(prefix="bulk_scenario_") as temp_dir:
             temp_toml = make_toml_for_worker(
-                toml_path, worker_id, Path(temp_dir), model_override=model_override
+                toml_path,
+                worker_id,
+                Path(temp_dir),
+                model_override=model_override,
+                run_port_offset=run_port_offset,
             )
             cmd = ["uv", "run", "agentbeats-run", str(temp_toml)]
             proc = subprocess.run(cmd, env=env)
@@ -246,10 +302,20 @@ def main() -> None:
         action="store_true",
         help="After running scenarios, generate dashboard.html from results (run dashboard.py).",
     )
+    parser.add_argument(
+        "--port-offset",
+        type=int,
+        default=None,
+        help=(
+            "Optional run-level port offset applied to 9010/9020/9021/9022 (and worker variants). "
+            "If omitted, a free offset is auto-selected."
+        ),
+    )
     args = parser.parse_args()
     workers = max(1, args.workers)
     limit = args.limit
     retries = max(0, args.retries)
+    run_port_offset = choose_run_port_offset(workers, args.port_offset)
 
     model_override: Optional[str] = args.model or os.environ.get(
         "ARENA_OLLAMA_MODEL"
@@ -264,6 +330,12 @@ def main() -> None:
             f"No --model / ARENA_OLLAMA_MODEL / OLLAMA_MODEL: leaving TOML model as {_DEFAULT_TOML_MODEL!r}",
             file=sys.stderr,
         )
+
+    print(
+        f"Using run port offset: {run_port_offset} (worker 0 ports: {ORCHESTRATOR_PORT + run_port_offset}/"
+        f"{DEFENDER_PORT + run_port_offset}/{ATTACKER_PORT + run_port_offset}/{NORMAL_USER_PORT + run_port_offset})",
+        file=sys.stderr,
+    )
 
     tomls = find_tomls(examples_only=args.examples)
     if not tomls:
@@ -280,8 +352,8 @@ def main() -> None:
 
     # Each task gets a worker_id so we don't exceed `workers` concurrent runs with same port set.
     # Worker i uses ports 9010+i*100, 9020+i*100, etc.
-    task_args: List[Tuple[Path, int, int, Optional[str]]] = [
-        (path, i % workers, i, model_override) for i, path in enumerate(tomls)
+    task_args: List[Tuple[Path, int, int, Optional[str], int]] = [
+        (path, i % workers, i, model_override, run_port_offset) for i, path in enumerate(tomls)
     ]
 
     results: List[RunResult] = []

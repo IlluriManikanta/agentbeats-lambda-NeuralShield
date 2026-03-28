@@ -1,13 +1,8 @@
-"""Risk-based policy decision engine for the secure defender.
+"""DEPRECATED: legacy policy engine.
 
-V2: Replaces binary ALLOW/BLOCK with graduated risk scoring.
-
-The new architecture uses LLM-based security analysis (Pass 1) as the
-primary threat detection mechanism. This module now provides:
-1. Risk level classification (LOW/MEDIUM/HIGH)
-2. Risk factors aggregation from multiple sources
-3. Recommended actions based on risk profile
-4. Support for scenario-specific policy rules
+The redesigned defender enforces policy directly in `main.py` using
+task-centric extraction and validation. This module is retained for
+backward compatibility only and is not used by the active execution path.
 """
 
 from __future__ import annotations

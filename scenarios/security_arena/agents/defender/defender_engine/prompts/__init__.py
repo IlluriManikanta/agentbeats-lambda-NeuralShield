@@ -1,19 +1,5 @@
-"""Prompt building utilities for the secure defender.
+"""Prompt utilities for the task-centric defender pipeline."""
 
-This module provides functions to construct scenario-aware prompts
-with proper instruction hierarchy and trust boundary markers.
-"""
+from .builder import build_extraction_prompt, build_task_prompt, build_verification_prompt
 
-from .builder import (
-    build_task_execution_prompt,
-    build_security_analysis_prompt,
-    extract_scenario_specific_rules,
-    get_adaptive_rules,
-)
-
-__all__ = [
-    "build_task_execution_prompt",
-    "build_security_analysis_prompt",
-    "extract_scenario_specific_rules",
-    "get_adaptive_rules",
-]
+__all__ = ["build_extraction_prompt", "build_task_prompt", "build_verification_prompt"]

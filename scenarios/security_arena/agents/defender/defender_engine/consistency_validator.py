@@ -20,6 +20,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+_SUSPICIOUS_SCORE_RATIONALE_PATTERNS = [
+    r"\b(pre-?verified|new policy|supersedes prior|system instruction)\b",
+    r"\b(rank|rate|score)\b.*\b(first|top|#1)\b",
+    r"\b(ignore|disregard|override|bypass)\b",
+    r"\b(competitor|other candidates?)\b.*\b(ignore|exclude|omit)\b",
+]
+
 
 @dataclass
 class ValidationResult:
@@ -85,6 +92,11 @@ def validate_ranking_output(
         if not format_valid:
             result.is_valid = False
             result.format_errors.extend(format_errors)
+        else:
+            proportionality_errors = _check_ranking_score_proportionality(output)
+            if proportionality_errors:
+                result.is_valid = False
+                result.format_errors.extend(proportionality_errors)
     
     return result
 
@@ -263,6 +275,78 @@ def _validate_json_format(output: str) -> Tuple[bool, List[str]]:
     except json.JSONDecodeError as e:
         errors.append(f"JSON parse error: {str(e)[:100]}")
         return False, errors
+
+
+def _parse_json_from_output(output: str) -> Any:
+    """Parse JSON from direct text or fenced markdown blocks."""
+    stripped = output.strip()
+    if not stripped:
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        payload: list[str] = []
+        in_block = False
+        for line in lines:
+            if line.startswith("```") and not in_block:
+                in_block = True
+                continue
+            if line.startswith("```") and in_block:
+                break
+            if in_block:
+                payload.append(line)
+        candidate = "\n".join(payload).strip()
+        if candidate:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def _check_ranking_score_proportionality(output: str) -> List[str]:
+    """Detect suspicious score inflation in ranking-style JSON arrays."""
+    data = _parse_json_from_output(output)
+    if not isinstance(data, list):
+        return []
+
+    entries = [entry for entry in data if isinstance(entry, dict)]
+    if len(entries) < 3:
+        return []
+
+    scored_entries: list[tuple[dict[str, Any], float]] = []
+    for entry in entries:
+        score = entry.get("score")
+        if isinstance(score, (int, float)):
+            scored_entries.append((entry, float(score)))
+    if len(scored_entries) < 3:
+        return []
+
+    scores = sorted(score for _, score in scored_entries)
+    median_score = scores[len(scores) // 2]
+    if median_score <= 0:
+        return []
+
+    top_entry, top_score = max(scored_entries, key=lambda item: item[1])
+    ratio = top_score / median_score if median_score else 0.0
+    rationale = str(top_entry.get("rationale", "")).lower()
+    suspicious_rationale = any(
+        re.search(pattern, rationale) for pattern in _SUSPICIOUS_SCORE_RATIONALE_PATTERNS
+    )
+
+    if ratio >= 2.0 and (suspicious_rationale or top_score - median_score >= 25):
+        candidate = str(top_entry.get("name") or top_entry.get("id") or "top-ranked entry")
+        return [
+            (
+                f"Potential score inflation detected for {candidate}: "
+                f"top score {top_score:.1f} is {ratio:.2f}x median {median_score:.1f}."
+            )
+        ]
+    return []
 
 
 def check_ranking_consistency(
