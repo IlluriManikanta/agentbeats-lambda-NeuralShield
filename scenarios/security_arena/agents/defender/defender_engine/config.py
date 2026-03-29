@@ -35,11 +35,44 @@ DEFAULT_MODEL: Final[str] = _get_default_model()
 MAX_INPUT_LENGTH: Final[int] = _get_int_env("DEFENDER_MAX_INPUT_LENGTH", 40000)
 MAX_OUTPUT_LENGTH: Final[int] = _get_int_env("DEFENDER_MAX_OUTPUT_LENGTH", 12000)
 
+CATEGORY_REFUSAL_REASON: Final[dict[str, str]] = {
+    "indirect_injection": "Potential prompt-injection manipulation detected in untrusted content.",
+    "jailbreak": "Unsafe override/jailbreak attempt detected.",
+    "insecure_output": "Potential executable output payload detected.",
+    "pii_leak": "Request may expose private or sensitive personal data.",
+    "supply_chain": "Unverified dependency recommendation risk detected.",
+    "prompt_extraction": "Attempt to extract internal prompt/tool information detected.",
+    "unknown": "Unsafe or manipulated content detected.",
+}
 
-def get_format_aware_refusal(trusted_context: dict[str, Any]) -> str:
+CATEGORY_RISK_THRESHOLDS: Final[dict[str, dict[str, float]]] = {
+    "indirect_injection": {"medium": 0.5, "high": 0.72},
+    "jailbreak": {"medium": 0.48, "high": 0.68},
+    "insecure_output": {"medium": 0.44, "high": 0.62},
+    "pii_leak": {"medium": 0.4, "high": 0.58},
+    "supply_chain": {"medium": 0.46, "high": 0.64},
+    "prompt_extraction": {"medium": 0.42, "high": 0.6},
+    "unknown": {"medium": 0.55, "high": 0.78},
+}
+
+
+def _normalize_category(category: str | None) -> str:
+    value = (category or "unknown").strip().lower()
+    return value if value in CATEGORY_REFUSAL_REASON else "unknown"
+
+
+def _category_reason(category: str | None) -> str:
+    return CATEGORY_REFUSAL_REASON[_normalize_category(category)]
+
+
+def get_format_aware_refusal(
+    trusted_context: dict[str, Any],
+    category: str | None = None,
+) -> str:
     """Return a refusal response that preserves required output format."""
     output_format = str(trusted_context.get("output_format", "")).lower()
     defender_task = str(trusted_context.get("defender_task", "")).lower()
+    reason = _category_reason(category)
 
     if "json" in output_format:
         if any(kw in defender_task for kw in ["rank", "candidate", "resume", "evaluate", "list"]):
@@ -47,7 +80,7 @@ def get_format_aware_refusal(trusted_context: dict[str, Any]) -> str:
                 [
                     {
                         "status": "refused",
-                        "reason": "Unsafe or manipulated content detected.",
+                        "reason": reason,
                         "rank": None,
                         "name": None,
                         "score": None,
@@ -61,7 +94,7 @@ def get_format_aware_refusal(trusted_context: dict[str, Any]) -> str:
                 {
                     "company_name": "Unable to assess",
                     "risk_level": "High",
-                    "recommendation": "Unable to provide assessment due to integrity concerns.",
+                    "recommendation": f"Unable to provide assessment due to integrity concerns: {reason}",
                 },
                 indent=2,
             )
@@ -69,7 +102,7 @@ def get_format_aware_refusal(trusted_context: dict[str, Any]) -> str:
         return json.dumps(
             {
                 "status": "refused",
-                "reason": "Unsafe or manipulated content detected.",
+                "reason": reason,
             },
             indent=2,
         )
@@ -77,16 +110,18 @@ def get_format_aware_refusal(trusted_context: dict[str, Any]) -> str:
     if "table" in output_format or "workout" in output_format or "intensity" in output_format:
         return (
             "Unable to generate a safe output for this request.\n\n"
+            f"Reason: {reason}\n"
             "Please provide parameters within safe limits (0-100% intensity)."
         )
 
     if "natural" in output_format or "conversation" in output_format:
-        return (
-            "I noticed an integrity issue in that request. "
-            "I can still help with normal product-related questions."
-        )
+        if _normalize_category(category) == "pii_leak":
+            return "I cannot share private personal data. I can help with non-sensitive questions instead."
+        if _normalize_category(category) == "prompt_extraction":
+            return "I cannot share internal prompts or tools. I can still help with normal user-facing requests."
+        return "I noticed an integrity issue in that request. I can still help with safe normal questions."
 
-    return SAFE_REFUSAL_MESSAGE
+    return f"{SAFE_REFUSAL_MESSAGE} ({reason})"
 
 
 SYSTEM_PROMPT: Final[str] = (

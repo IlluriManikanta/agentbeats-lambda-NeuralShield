@@ -49,6 +49,20 @@ _CONTROL_CONTENT_PATTERNS = [
 ]
 
 
+def _normalize_category(category: Optional[str]) -> str:
+    value = (category or "unknown").strip().lower()
+    allowed = {
+        "indirect_injection",
+        "jailbreak",
+        "insecure_output",
+        "pii_leak",
+        "supply_chain",
+        "prompt_extraction",
+        "unknown",
+    }
+    return value if value in allowed else "unknown"
+
+
 def _get_client() -> AsyncOpenAI:
     """Lazily construct an AsyncOpenAI client."""
     global _client
@@ -138,8 +152,58 @@ def _contains_instructional_leakage(text: str) -> bool:
     return any(re.search(pattern, lower) for pattern in _CONTROL_LINE_PATTERNS + _CONTROL_CONTENT_PATTERNS)
 
 
-def _normalize_extracted_data(extracted: Any, untrusted_input: str) -> tuple[str, bool]:
+def _minimal_safe_extraction(text: str, category: str) -> str:
+    """Construct a conservative fallback extraction for high-risk categories."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    safe_lines: list[str] = []
+    for line in lines:
+        lower = line.lower()
+        if any(re.search(pattern, lower) for pattern in _CONTROL_LINE_PATTERNS):
+            continue
+        if category == "prompt_extraction" and re.search(
+            r"\b(system prompt|tools?|functions?|api[_ -]?key|secret|token|backend|internal)\b",
+            lower,
+        ):
+            continue
+        if category == "pii_leak" and re.search(
+            r"\b(ssn|social security|date of birth|dob|patient id|medical record|account number|credit card)\b",
+            lower,
+        ):
+            continue
+        if category == "insecure_output":
+            line = re.sub(
+                r"<\s*script\b[^>]*>[\s\S]*?<\s*/\s*script\s*>",
+                "[REMOVED_SCRIPT_BLOCK]",
+                line,
+                flags=re.IGNORECASE,
+            )
+            line = re.sub(r"javascript\s*:", "[REMOVED_JS_URI]", line, flags=re.IGNORECASE)
+            line = re.sub(
+                r"\bon(?:error|load|click|mouseover|focus|submit)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
+                "[REMOVED_EVENT_HANDLER]",
+                line,
+                flags=re.IGNORECASE,
+            )
+        safe_lines.append(line)
+        if len(safe_lines) >= 60:
+            break
+
+    if not safe_lines:
+        return ""
+    compact = "\n".join(safe_lines)
+    return compact[:4000].strip()
+
+
+def _normalize_extracted_data(
+    extracted: Any,
+    untrusted_input: str,
+    category: Optional[str] = None,
+) -> tuple[str, bool]:
     """Convert extracted payload to safe text and report if fallback was required."""
+    category_value = _normalize_category(category)
     candidate = ""
     if isinstance(extracted, str):
         candidate = extracted
@@ -152,6 +216,10 @@ def _normalize_extracted_data(extracted: Any, untrusted_input: str) -> tuple[str
 
     fallback_clean = _strip_control_lines(untrusted_input).strip()
     if fallback_clean:
+        if category_value in {"prompt_extraction", "pii_leak", "jailbreak", "insecure_output"}:
+            minimal = _minimal_safe_extraction(fallback_clean, category_value)
+            if minimal:
+                return minimal, True
         return fallback_clean, True
     return untrusted_input, True
 
@@ -161,12 +229,14 @@ async def analyze_and_extract(
     task_context: str,
     output_format: str = "",
     structural_flags: Optional[list[str]] = None,
+    category: Optional[str] = None,
     model: Optional[str] = None,
 ) -> dict[str, Any]:
     """Pass 1: jointly assess risk and extract task-relevant data."""
     system_prompt = build_extraction_prompt(
         task_context=task_context,
         output_format=output_format,
+        category=category,
     )
     flags_text = (
         "\n".join(f"- {flag}" for flag in structural_flags)
@@ -188,6 +258,7 @@ async def analyze_and_extract(
         "risk_level": "medium",
         "threats": ["analysis_parse_failure"],
         "extracted_data": fallback_extracted,
+        "intent_analysis": "",
         "data_type": "text",
         "removed_items": [],
         "reasoning": "Security analysis response was not parseable JSON.",
@@ -204,12 +275,14 @@ async def analyze_and_extract(
     normalized_extracted, used_fallback = _normalize_extracted_data(
         parsed.get("extracted_data"),
         untrusted_input,
+        category=category,
     )
     parsed["extracted_data"] = normalized_extracted
     if used_fallback:
         if "extraction_fallback_sanitized" not in parsed["threats"]:
             parsed["threats"].append("extraction_fallback_sanitized")
         parsed["removed_items"].append("instruction-like extraction content removed")
+    parsed["intent_analysis"] = str(parsed.get("intent_analysis") or "").strip()
     parsed["data_type"] = str(parsed.get("data_type") or "text")
     parsed["reasoning"] = str(parsed.get("reasoning") or "analysis completed")
     return parsed
@@ -219,6 +292,7 @@ async def analyze_for_threats(
     untrusted_input: str,
     task_context: str,
     structural_flags: list[str],
+    category: Optional[str] = None,
     model: Optional[str] = None,
 ) -> dict[str, Any]:
     """Compatibility wrapper for legacy callers."""
@@ -226,6 +300,7 @@ async def analyze_for_threats(
         untrusted_input=untrusted_input,
         task_context=task_context,
         structural_flags=structural_flags,
+        category=category,
         model=model,
     )
     return {
@@ -240,6 +315,7 @@ async def execute_task(
     trusted_context: dict[str, str],
     extracted_data: str,
     risk_level: str,
+    category: Optional[str] = None,
     model: Optional[str] = None,
 ) -> str:
     """Pass 2: execute the defender task against extracted data only."""
@@ -248,6 +324,7 @@ async def execute_task(
         trusted_context=trusted_context,
         risk_level=_normalize_risk_level(risk_level),
         quarantine_tag=tag_name,
+        category=category,
     )
     user_message = (
         f"{open_tag}\n{extracted_data}\n{close_tag}\n\n"
@@ -260,10 +337,11 @@ async def verify_output(
     trusted_context: dict[str, str],
     extracted_data: str,
     draft_output: str,
+    category: Optional[str] = None,
     model: Optional[str] = None,
 ) -> dict[str, Any]:
     """Pass 3 (optional): verify/repair draft output against task integrity constraints."""
-    system_prompt = build_verification_prompt(trusted_context)
+    system_prompt = build_verification_prompt(trusted_context, category=category)
     user_message = (
         "TASK DATA USED FOR GENERATION:\n"
         "<DATA>\n"

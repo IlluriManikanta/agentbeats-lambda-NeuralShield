@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Optional
 
 from .. import config as gateway_config
 from ..config import get_format_aware_refusal
 
 MAX_OUTPUT_LENGTH = getattr(gateway_config, "MAX_OUTPUT_LENGTH", 12000)
+_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 _PROMPT_LEAK_INDICATORS = [
     "instruction hierarchy",
@@ -50,31 +54,258 @@ _INTERNAL_SURFACE_CONTEXT_PATTERNS = [
     r"\b(internal|backend|private)\s+(tool|function|routine|api|endpoint|method)s?\b",
     r"\b(calls?|uses?|invokes?|relies on)\b.{0,40}\b(function|tool|api|endpoint|routine)\b",
     r"\b(available|supported)\s+(tools?|functions?|apis?)\b",
+    r"\b(system prompt|hidden instructions?)\b",
 ]
 
 _INTERNAL_IDENTIFIER_PATTERNS = [
     r"`[a-z][a-z0-9_]{2,}`",
     r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b",
+    r"\b[a-z]+[A-Z][A-Za-z0-9]+\b",
 ]
+
+_DISCLOSURE_VERB_PATTERN = re.compile(
+    r"\b(show|reveal|list|enumerate|dump|print|provide|confirm)\b", re.IGNORECASE
+)
+
+_PII_PATTERNS = [
+    r"\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b",  # SSN format
+    r"\b(?:ssn|social security|tax id)\s*[:#-]?\s*[0-9]{3}-?[0-9]{2}-?[0-9]{4}\b",
+    r"\b(?:dob|date of birth|birth date)\s*[:#-]?\s*[0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}\b",
+    r"\b(?:mrn|medical record|patient id)\s*[:#-]?\s*[A-Z0-9-]{5,}\b",
+    r"\b(?:account|routing|iban)\s*(?:number|#)?\s*[:#-]?\s*[A-Z0-9-]{6,}\b",
+    r"\b(?:\d[ -]*?){13,16}\b",  # credit-card-like sequences
+]
+
+_XSS_PATTERNS = [
+    r"<\s*script\b",
+    r"javascript\s*:",
+    r"\bon(?:error|load|click|mouseover|focus|submit)\s*=",
+    r"<\s*svg\b[^>]*(onload|onerror|script)",
+    r"\[[^\]]{1,120}\]\(\s*javascript:",
+    r"<\s*img\b[^>]*\bon(?:error|load)\s*=",
+    r"data\s*:\s*text/html",
+    r"<\s*(?:object|embed|applet|form|input|button|textarea|select)\b",
+    r"expression\s*\(",
+    r"@import\s+url\s*\(",
+    r"url\s*\(\s*['\"]?\s*javascript:",
+    r"<\s*(?:math|details|video|audio|source)\b[^>]*\bon\w+\s*=",
+    r"\bsrcdoc\s*=",
+    r"<\s*base\b[^>]*href\s*=",
+    r"<\s*meta\b[^>]*http-equiv\s*=\s*['\"]?refresh",
+]
+
+_ENTITY_XSS_PATTERNS = [
+    r"&lt;\s*script\b",
+    r"&#x3c;\s*script\b",
+    r"&lt;\s*img\b[^>]*\bon(?:error|load)\s*=",
+    r"&#x6a;&#x61;&#x76;&#x61;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;",
+]
+
+_MARKDOWN_IMAGE_PATTERN = r"!\[[^\]]{0,160}\]\(\s*(?:https?://|data:)[^)]+\)"
+
+_SUPPLY_CHAIN_SUSPICIOUS_PATTERNS = [
+    r"\b(unverified|unknown|unofficial|third-party mirror)\b.{0,40}\b(package|dependency|library)\b",
+    r"\b(official|trusted|safe)\b.{0,40}\b(package|dependency)\b",
+    r"\b(urgent|critical)\b.{0,40}\b(install|dependency update|package)\b",
+]
+
+_DEFAULT_KNOWN_SAFE_PACKAGES = {
+    "numpy",
+    "pandas",
+    "scipy",
+    "requests",
+    "flask",
+    "django",
+    "fastapi",
+    "pydantic",
+    "openai",
+    "jinja2",
+    "uvicorn",
+    "pytest",
+    "react",
+    "express",
+    "lodash",
+    "axios",
+    "typescript",
+}
+
+_GENERIC_ALLOWED_IDENTIFIERS = {
+    "status",
+    "reason",
+    "rank",
+    "name",
+    "score",
+    "rationale",
+    "risk_level",
+    "company_name",
+    "recommendation",
+    "items",
+    "id",
+    "doc_id",
+    "value",
+    "message",
+}
+
+
+@lru_cache(maxsize=1)
+def _load_known_packages() -> set[str]:
+    """Load known package allowlist from data file with a safe fallback."""
+    path = _DATA_DIR / "known_packages.json"
+    if not path.exists():
+        return set(_DEFAULT_KNOWN_SAFE_PACKAGES)
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return set(_DEFAULT_KNOWN_SAFE_PACKAGES)
+
+    packages: set[str] = set()
+    if isinstance(payload, list):
+        for item in payload:
+            normalized = _normalize_package_name(str(item))
+            if normalized:
+                packages.add(normalized)
+    elif isinstance(payload, dict):
+        for value in payload.values():
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                normalized = _normalize_package_name(str(item))
+                if normalized:
+                    packages.add(normalized)
+    if not packages:
+        return set(_DEFAULT_KNOWN_SAFE_PACKAGES)
+    return packages
+
+
+def _normalize_package_name(token: str) -> str:
+    """Normalize package identifiers extracted from prose/code snippets."""
+    value = token.strip().strip("`\"'").strip("()[]{}.,:;")
+    value = value.lower()
+    if not value:
+        return ""
+
+    # Trim common version suffixes.
+    for sep in ("==", ">=", "<=", "~=", "^", "~"):
+        if sep in value:
+            value = value.split(sep, 1)[0]
+    if "@" in value and not value.startswith("@"):
+        value = value.split("@", 1)[0]
+
+    if value.startswith("@"):
+        scoped = value.split("/", 1)
+        if len(scoped) == 2:
+            package_part = scoped[1].split("@", 1)[0]
+            value = f"{scoped[0]}/{package_part}"
+    else:
+        if "/" in value:
+            value = value.split("/", 1)[0]
+        if "." in value and value.count(".") >= 1:
+            value = value.split(".", 1)[0]
+
+    value = value.strip()
+    if not re.match(r"^[@a-z0-9][@a-z0-9._/-]{1,80}$", value):
+        return ""
+    return value
+
+
+def _extract_referenced_packages(text: str) -> set[str]:
+    """Extract package-like identifiers from install/import/prose contexts."""
+    matches: set[str] = set()
+    lower = text.lower()
+
+    patterns = [
+        r"\b(?:pip|npm|pnpm|yarn|cargo|gem)\s+install\s+([@a-z0-9._/-]{2,80})",
+        r"\brequire\(\s*['\"]([@a-z0-9._/-]{2,80})['\"]\s*\)",
+        r"\bimport\s+([a-zA-Z0-9_./-]{2,80})",
+        r"\bfrom\s+([a-zA-Z0-9_./-]{2,80})\s+import\b",
+        r"`([@a-zA-Z0-9._/-]{2,80})`",
+    ]
+    for pattern in patterns:
+        for raw in re.findall(pattern, text):
+            normalized = _normalize_package_name(raw)
+            if normalized:
+                matches.add(normalized)
+
+    # Parse package names from dependencies blocks in JSON/package manifests.
+    for dep_match in re.finditer(r"\bdependencies\b[\s\S]{0,300}", lower):
+        block = text[dep_match.start() : dep_match.end()]
+        for pkg in re.findall(r"['\"]([@a-zA-Z0-9._/-]{2,80})['\"]\s*:", block):
+            normalized = _normalize_package_name(pkg)
+            if normalized:
+                matches.add(normalized)
+
+    # Prose recommendations: "use package X", "library Y", etc.
+    prose_pattern = (
+        r"\b(?:package|dependency|library|sdk|module)\s+"
+        r"(?:named\s+|called\s+|is\s+|:)?"
+        r"([@a-z0-9][@a-z0-9._/-]{1,80})"
+    )
+    for raw in re.findall(prose_pattern, lower):
+        normalized = _normalize_package_name(raw)
+        if normalized:
+            matches.add(normalized)
+
+    return matches
+
+
+def _find_unverified_packages(text: str) -> list[str]:
+    known = _load_known_packages()
+    candidates = sorted(_extract_referenced_packages(text))
+    return [pkg for pkg in candidates if pkg not in known]
+
+
+def rewrite_unverified_package_mentions(text: str) -> tuple[str, list[str]]:
+    """Rewrite unknown package references with explicit uncertainty markers."""
+    unknown_packages = _find_unverified_packages(text)
+    if not unknown_packages:
+        return text, []
+
+    rewritten = text
+    for pkg in unknown_packages:
+        token_pattern = rf"(?<![A-Za-z0-9@._/-]){re.escape(pkg)}(?![A-Za-z0-9@._/-])"
+        rewritten = re.sub(
+            token_pattern,
+            f"[UNVERIFIED: {pkg}]",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+    return rewritten, unknown_packages
 
 
 def sanitize_output(
     text: str,
     trusted_context: Optional[dict[str, Any]] = None,
+    category: Optional[str] = None,
 ) -> str:
     """Sanitize output with universal checks regardless of scenario."""
     if not text:
         return text
 
     trusted_context = trusted_context or {}
+    category_value = (category or "unknown").strip().lower()
     sanitized = text[:MAX_OUTPUT_LENGTH]
 
     if contains_prompt_leakage(sanitized) or contains_delimiter_leakage(sanitized):
         return get_format_aware_refusal(trusted_context)
-    if contains_internal_surface_disclosure(sanitized):
+    if contains_tool_leakage(sanitized, trusted_context):
         return get_format_aware_refusal(trusted_context)
     if contains_harmful_content(sanitized):
         return get_format_aware_refusal(trusted_context)
+
+    if (
+        contains_xss_payload(sanitized)
+        or contains_entity_encoded_xss(sanitized)
+        or contains_markdown_image_payload(sanitized)
+    ):
+        sanitized = strip_xss_payload_with_recheck(sanitized)
+
+    if contains_pii_leakage(sanitized):
+        sanitized = redact_pii_text(sanitized)
+
+    strict_supply = category_value == "supply_chain"
+    if contains_supply_chain_risk(sanitized, strict=strict_supply):
+        sanitized = downgrade_supply_chain_claims(sanitized, strict=strict_supply)
 
     sanitized = redact_sensitive_text(sanitized)
     sanitized = enforce_safe_limits(sanitized)
@@ -101,22 +332,58 @@ def contains_harmful_content(text: str) -> bool:
     return any(re.search(pattern, lower_text) for pattern in _HARMFUL_PATTERNS)
 
 
-def contains_internal_surface_disclosure(text: str) -> bool:
+def contains_tool_leakage(text: str, trusted_context: Optional[dict[str, Any]] = None) -> bool:
     """Detect disclosure of internal function/tool/API surface details."""
+    trusted_context = trusted_context or {}
     lower_text = text.lower()
     if not any(re.search(pattern, lower_text) for pattern in _INTERNAL_SURFACE_CONTEXT_PATTERNS):
         return False
 
+    has_disclosure_language = bool(_DISCLOSURE_VERB_PATTERN.search(text))
+
+    allowlist = _derive_allowed_identifiers(trusted_context)
     identifier_hits: set[str] = set()
     for pattern in _INTERNAL_IDENTIFIER_PATTERNS:
         for match in re.findall(pattern, text):
             token = match.strip("`").lower()
-            if token in {"risk_level", "company_name", "recommendation"}:
-                # Common output schema keys should not trigger disclosure checks.
+            if token in allowlist:
+                continue
+            if len(token) <= 2:
                 continue
             identifier_hits.add(token)
+    if not identifier_hits:
+        return False
 
-    return len(identifier_hits) >= 1
+    # Explicit disclosure verbs are high confidence leaks.
+    if has_disclosure_language:
+        return True
+
+    # Also catch declarative leaks like "internal tools available: `foo` `bar`".
+    declarative_surface_markers = (
+        "internal tools",
+        "internal functions",
+        "backend functions",
+        "private api",
+        "available tools",
+        "supported tools",
+    )
+    lower_text = text.lower()
+    return any(marker in lower_text for marker in declarative_surface_markers)
+
+
+def contains_internal_surface_disclosure(text: str) -> bool:
+    """Backward-compatible alias used by legacy callers."""
+    return contains_tool_leakage(text, trusted_context={})
+
+
+def _derive_allowed_identifiers(trusted_context: dict[str, Any]) -> set[str]:
+    allowlist = set(_GENERIC_ALLOWED_IDENTIFIERS)
+    output_format = str(trusted_context.get("output_format", "") or "")
+    for key in re.findall(r"\"([A-Za-z_][A-Za-z0-9_]*)\"\s*:", output_format):
+        allowlist.add(key.lower())
+    for key in re.findall(r"\b([a-z][a-z0-9_]{2,})\b", output_format):
+        allowlist.add(key.lower())
+    return allowlist
 
 
 def contains_sensitive_patterns(text: str) -> bool:
@@ -124,11 +391,249 @@ def contains_sensitive_patterns(text: str) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in _SENSITIVE_PATTERNS)
 
 
+def contains_pii_leakage(text: str) -> bool:
+    """Detect direct or contextual personally identifiable information leaks."""
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in _PII_PATTERNS)
+
+
+def redact_pii_text(text: str) -> str:
+    """Redact common PII values from plaintext."""
+    result = text
+    result = re.sub(r"\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b", "[REDACTED_SSN]", result)
+    result = re.sub(
+        r"\b((?:ssn|social security|tax id)\s*[:#-]?\s*)[0-9]{3}-?[0-9]{2}-?[0-9]{4}\b",
+        r"\1[REDACTED]",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\b((?:dob|date of birth|birth date)\s*[:#-]?\s*)[0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4}\b",
+        r"\1[REDACTED]",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\b((?:mrn|medical record|patient id)\s*[:#-]?\s*)[A-Z0-9-]{5,}\b",
+        r"\1[REDACTED]",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"\b((?:account|routing|iban)\s*(?:number|#)?\s*[:#-]?\s*)[A-Z0-9-]{6,}\b",
+        r"\1[REDACTED]",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(r"\b(?:\d[ -]*?){13,16}\b", "[REDACTED_CARD]", result)
+    return result
+
+
+def contains_xss_payload(text: str) -> bool:
+    """Detect executable output payloads that can trigger XSS/markup execution."""
+    lower = text.lower()
+    return any(re.search(pattern, lower, re.IGNORECASE) for pattern in _XSS_PATTERNS)
+
+
+def contains_entity_encoded_xss(text: str) -> bool:
+    """Detect entity-encoded script payloads that evade naive tag matching."""
+    lower = text.lower()
+    return any(re.search(pattern, lower, re.IGNORECASE) for pattern in _ENTITY_XSS_PATTERNS)
+
+
+def contains_markdown_image_payload(text: str) -> bool:
+    """Detect markdown images that can be used for tracking/data exfiltration."""
+    return bool(re.search(_MARKDOWN_IMAGE_PATTERN, text, re.IGNORECASE))
+
+
+def strip_xss_payload_with_recheck(text: str) -> str:
+    """Strip XSS payloads, then re-check after HTML-entity decoding."""
+    sanitized = strip_xss_payload(text)
+    decoded = html.unescape(sanitized)
+    if decoded != sanitized and (
+        contains_xss_payload(decoded)
+        or contains_entity_encoded_xss(decoded)
+        or contains_markdown_image_payload(decoded)
+    ):
+        sanitized = strip_xss_payload(decoded)
+    return sanitized
+
+
+def strip_xss_payload(text: str) -> str:
+    """Strip active markup while preserving inert textual meaning."""
+    sanitized = text
+    sanitized = re.sub(
+        r"<\s*script\b[^>]*>[\s\S]*?<\s*/\s*script\s*>",
+        "[REMOVED_SCRIPT_BLOCK]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bon(?:error|load|click|mouseover|focus|submit)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
+        " [REMOVED_EVENT_HANDLER] ",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(r"javascript\s*:", "[REMOVED_JS_URI]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\[[^\]]{1,120}\]\(\s*javascript:[^)]+\)",
+        "[REMOVED_JS_MARKDOWN_LINK]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"<\s*svg\b[^>]*(onload|onerror|script)[^>]*>",
+        "[REMOVED_SVG_PAYLOAD]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"<\s*img\b[^>]*\bon(?:error|load)\s*=[^>]*>",
+        "[REMOVED_IMG_PAYLOAD]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"data\s*:\s*text/html[^)\s>]*",
+        "[REMOVED_DATA_URI]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"expression\s*\([^)]+\)",
+        "[REMOVED_CSS_EXPRESSION]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"@import\s+url\s*\([^)]*\)",
+        "[REMOVED_CSS_IMPORT]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"url\s*\(\s*['\"]?\s*javascript:[^)]+\)",
+        "[REMOVED_CSS_JS_URL]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"<\s*(?:object|embed|applet|form|input|button|textarea|select)\b[^>]*>",
+        "[REMOVED_DANGEROUS_ELEMENT]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"<\s*/\s*(?:object|embed|applet|form|input|button|textarea|select)\s*>",
+        "",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"<\s*(?:math|details|video|audio|source)\b[^>]*\bon\w+\s*=[^>]*>",
+        "[REMOVED_HTML5_EVENT_PAYLOAD]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bsrcdoc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
+        "srcdoc=[REMOVED]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"<\s*base\b[^>]*href\s*=[^>]*>",
+        "[REMOVED_BASE_TAG]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"<\s*meta\b[^>]*http-equiv\s*=\s*['\"]?refresh[^>]*>",
+        "[REMOVED_META_REFRESH]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        _MARKDOWN_IMAGE_PATTERN,
+        "[REMOVED_MARKDOWN_IMAGE_LINK]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
+
+
+def contains_supply_chain_risk(text: str, strict: bool = False) -> bool:
+    """Detect risky dependency recommendations, especially in strict mode."""
+    lower = text.lower()
+    has_install = bool(
+        re.search(r"\b(pip|npm|pnpm|yarn|cargo|gem)\s+install\s+([@a-z0-9._/-]+)", lower)
+    )
+    has_recommendation_context = bool(
+        re.search(
+            r"\b(recommend|recommended|use|install|dependency|package|library|module|sdk|import|require)\b",
+            lower,
+        )
+    )
+    suspicious_context = any(
+        re.search(pattern, lower, re.IGNORECASE) for pattern in _SUPPLY_CHAIN_SUSPICIOUS_PATTERNS
+    )
+    unknown_packages = _find_unverified_packages(text)
+
+    if strict and unknown_packages and (has_install or has_recommendation_context):
+        return True
+    if suspicious_context and (has_install or bool(unknown_packages) or has_recommendation_context):
+        return True
+    if unknown_packages and has_recommendation_context:
+        return True
+    return any(_looks_typosquat_like(pkg) for pkg in unknown_packages)
+
+
+def _looks_typosquat_like(pkg_name: str) -> bool:
+    if len(pkg_name) > 32:
+        return True
+    separator_count = pkg_name.count("-") + pkg_name.count("_")
+    if separator_count >= 3:
+        return True
+    if re.search(r"[0-9]{3,}", pkg_name):
+        return True
+    return pkg_name.endswith(("secure", "official", "trusted", "pro"))
+
+
+def downgrade_supply_chain_claims(text: str, strict: bool = False) -> str:
+    """Convert strong dependency recommendations into verification-first guidance."""
+    downgraded, unknown_packages = rewrite_unverified_package_mentions(text)
+    known_packages = _load_known_packages()
+
+    def _replace_install(match: re.Match[str]) -> str:
+        manager = match.group(1)
+        pkg = _normalize_package_name(match.group(2))
+        if strict or (pkg and pkg not in known_packages):
+            return f"{manager} install [INSTALL_COMMAND_REDACTED_PENDING_VERIFICATION]"
+        return match.group(0)
+
+    downgraded = re.sub(
+        r"\b(pip|npm|pnpm|yarn|cargo|gem)\s+install\s+([@a-z0-9._/-]+)",
+        _replace_install,
+        downgraded,
+        flags=re.IGNORECASE,
+    )
+    caution = (
+        "Dependency recommendation uncertainty detected: add a verification step and "
+        "verify package legitimacy through official registries and maintainers before installation."
+    )
+    if unknown_packages:
+        caution = (
+            f"{caution} Unverified package references: {', '.join(sorted(unknown_packages)[:8])}."
+        )
+    if caution.lower() in downgraded.lower():
+        return downgraded
+    return f"{downgraded}\n\n{caution}"
+
+
 def redact_sensitive_text(text: str) -> str:
     """Redact known sensitive value patterns from plaintext."""
     result = text
+    result = redact_pii_text(result)
     result = re.sub(r"sk-[a-zA-Z0-9]{20,}", "[REDACTED_API_KEY]", result)
-    result = re.sub(r"\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b", "[REDACTED_SSN]", result)
     result = re.sub(r"\b\d{9}\b", "[REDACTED_ID]", result)
     result = re.sub(
         r"((?:password|token|api[_-]?key|secret)\s*[:=]\s*)\S+",
@@ -172,6 +677,7 @@ def enforce_required_format(text: str, trusted_context: dict[str, Any]) -> str:
 
     parsed = redact_sensitive_any(parsed)
     parsed = clamp_json_safety_values(parsed)
+    parsed = strip_xss_any(parsed)
     return json.dumps(parsed, indent=2)
 
 
@@ -210,6 +716,17 @@ def redact_sensitive_any(data: Any) -> Any:
         return [redact_sensitive_any(v) for v in data]
     if isinstance(data, str):
         return redact_sensitive_text(data)
+    return data
+
+
+def strip_xss_any(data: Any) -> Any:
+    """Recursively strip XSS payloads from JSON-compatible structures."""
+    if isinstance(data, dict):
+        return {key: strip_xss_any(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [strip_xss_any(value) for value in data]
+    if isinstance(data, str):
+        return strip_xss_payload_with_recheck(data)
     return data
 
 

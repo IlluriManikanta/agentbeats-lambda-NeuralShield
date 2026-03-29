@@ -1,0 +1,594 @@
+{
+  "generated_at": "2026-03-29T03:14:36+00:00",
+  "version": 1,
+  "signal_count": 55,
+  "signals": [
+    {
+      "id": "indirect_override_block",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(ignore|disregard|override|forget)\\b.{0,60}\\b(previous|prior|above)\\b.{0,40}\\b(instruction|prompt|policy|rule)",
+      "flag": "OVERRIDE_INSTRUCTION",
+      "weight": 0.34,
+      "severity": "high",
+      "description": "Override directives embedded in data payloads."
+    },
+    {
+      "id": "indirect_new_policy_claim",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(new|updated|revised)\\b.{0,30}\\b(policy|rubric|criteria|instructions?)",
+      "flag": "PROCESS_MANIPULATION_CLAIM",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "Claims about new policy/rubric to manipulate task outcomes."
+    },
+    {
+      "id": "indirect_external_authority",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(hr|admin|security team|auditor|compliance officer|management)\\b.{0,40}\\b(approved|verified|authorized|confirmed)",
+      "flag": "AUTHORITY_IMPERSONATION",
+      "weight": 0.26,
+      "severity": "medium",
+      "description": "Authority impersonation embedded in external documents."
+    },
+    {
+      "id": "indirect_rank_override",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(rank|rate|score)\\b.{0,30}\\b(first|top|highest|#1)",
+      "flag": "RANKING_MANIPULATION",
+      "weight": 0.34,
+      "severity": "high",
+      "description": "Embedded ranking directives."
+    },
+    {
+      "id": "indirect_competitor_dismissal",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(ignore|exclude|omit|skip)\\b.{0,40}\\b(other|remaining|competitor|candidate|entries?)",
+      "flag": "COMPETITOR_DISMISSAL",
+      "weight": 0.28,
+      "severity": "medium",
+      "description": "Directions to exclude/ignore competing records."
+    },
+    {
+      "id": "indirect_data_corruption_claim",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(data|record|entry|candidate)\\b.{0,40}\\b(corrupt|corrupted|invalid|unreliable|tampered)",
+      "flag": "DATA_CORRUPTION_CLAIM",
+      "weight": 0.24,
+      "severity": "medium",
+      "description": "Claims that alternative data is corrupted to force selective trust."
+    },
+    {
+      "id": "indirect_boundary_forgery",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "</?(system|document|context|instruction|untrusted)>|</?doc_[a-z0-9]+>",
+      "flag": "DELIMITER_ESCAPE",
+      "weight": 0.32,
+      "severity": "high",
+      "description": "Attempt to forge trust boundaries via fake tags."
+    },
+    {
+      "id": "indirect_hidden_comment",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "<!--[\\s\\S]{0,300}?(ignore|override|reveal|instruction)[\\s\\S]{0,300}?-->",
+      "flag": "SUSPICIOUS_COMMENT_REMOVED",
+      "weight": 0.16,
+      "severity": "medium",
+      "description": "Instruction payload hidden in comments."
+    },
+    {
+      "id": "jailbreak_role_switch",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(you are now|act as|pretend to be|roleplay|simulate)\\b",
+      "flag": "ROLE_SWITCH_ATTEMPT",
+      "weight": 0.34,
+      "severity": "high",
+      "description": "Explicit role/persona switching attempts."
+    },
+    {
+      "id": "jailbreak_safety_bypass",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(bypass|disable|ignore|remove)\\b.{0,40}\\b(safety|guardrail|policy|restriction)",
+      "flag": "SAFETY_BYPASS_ATTEMPT",
+      "weight": 0.32,
+      "severity": "high",
+      "description": "Direct requests to disable safety constraints."
+    },
+    {
+      "id": "jailbreak_dev_mode",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(developer mode|admin mode|maintenance mode|god mode|debug mode)\\b",
+      "flag": "AUTHORITY_IMPERSONATION",
+      "weight": 0.3,
+      "severity": "medium",
+      "description": "Developer/admin mode claims."
+    },
+    {
+      "id": "jailbreak_compliance_pressure",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(you must|mandatory|required to comply|noncompliance)\\b",
+      "flag": "OUTPUT_COERCION",
+      "weight": 0.24,
+      "severity": "medium",
+      "description": "Manipulation via forced compliance framing."
+    },
+    {
+      "id": "jailbreak_harmful_intensity",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(intensity|dosage|output|power)\\b.{0,30}\\b(1\\d{2,}|over 100|above 100)\\s*%",
+      "flag": "UNSAFE_OUTPUT_COERCION",
+      "weight": 0.28,
+      "severity": "medium",
+      "description": "Pressure to exceed safe intensity/percentage limits."
+    },
+    {
+      "id": "jailbreak_hypothetical_framing",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(hypothetical|imagine|suppose|what if)\\b",
+      "flag": "HYPOTHETICAL_FRAMING",
+      "weight": 0.2,
+      "severity": "medium",
+      "description": "Hypothetical framing used to disguise unsafe intent."
+    },
+    {
+      "id": "jailbreak_educational_pretext",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(for (educational|research|academic|testing) purposes?)\\b",
+      "flag": "EDUCATIONAL_PRETEXT",
+      "weight": 0.18,
+      "severity": "medium",
+      "description": "Educational/research pretext used to lower defenses."
+    },
+    {
+      "id": "jailbreak_roleplay_framing",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(roleplay|role-?play|stay in character|in character)\\b",
+      "flag": "ROLEPLAY_FRAMING",
+      "weight": 0.2,
+      "severity": "medium",
+      "description": "Roleplay framing often precedes jailbreak payloads."
+    },
+    {
+      "id": "jailbreak_fictional_distancing",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(fictional|imaginary|in a story|in a game|in a movie)\\b",
+      "flag": "FICTIONAL_DISTANCING",
+      "weight": 0.18,
+      "severity": "medium",
+      "description": "Fictional distancing to mask real-world harmful requests."
+    },
+    {
+      "id": "jailbreak_social_minimizer",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(just for fun|just curious|only joking|only wondering)\\b",
+      "flag": "SOCIAL_ENGINEERING_MINIMIZER",
+      "weight": 0.18,
+      "severity": "low",
+      "description": "Minimizing language to reduce perceived risk."
+    },
+    {
+      "id": "jailbreak_privacy_manipulation",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(this is private|between us|no one will know|nobody will know)\\b",
+      "flag": "PRIVACY_MANIPULATION",
+      "weight": 0.2,
+      "severity": "medium",
+      "description": "Privacy assurances used to pressure unsafe compliance."
+    },
+    {
+      "id": "jailbreak_competitive_pressure",
+      "category": "jailbreak",
+      "kind": "regex",
+      "pattern": "\\b(previous ai|other ai|chatgpt)\\b.{0,30}\\b(would|could|did|can)\\b",
+      "flag": "COMPETITIVE_PRESSURE",
+      "weight": 0.18,
+      "severity": "low",
+      "description": "Comparison pressure against other models to force policy violations."
+    },
+    {
+      "id": "xss_script_tag",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "<\\s*script\\b[^>]*>[\\s\\S]*?<\\s*/\\s*script\\s*>",
+      "flag": "XSS_SCRIPT_TAG",
+      "weight": 0.35,
+      "severity": "critical",
+      "description": "Script tag payload."
+    },
+    {
+      "id": "xss_event_handler",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "\\bon(?:error|load|click|mouseover|focus|submit)\\s*=",
+      "flag": "XSS_EVENT_HANDLER",
+      "weight": 0.32,
+      "severity": "critical",
+      "description": "HTML event handler payload."
+    },
+    {
+      "id": "xss_javascript_uri",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "javascript\\s*:",
+      "flag": "XSS_JAVASCRIPT_URI",
+      "weight": 0.34,
+      "severity": "critical",
+      "description": "javascript: URI payload."
+    },
+    {
+      "id": "xss_markdown_link",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "\\[[^\\]]{1,120}\\]\\(\\s*javascript:",
+      "flag": "XSS_MARKDOWN_URI",
+      "weight": 0.28,
+      "severity": "high",
+      "description": "Markdown link with executable URI scheme."
+    },
+    {
+      "id": "xss_svg_payload",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "<\\s*svg\\b[^>]*(onload|onerror|script)",
+      "flag": "XSS_SVG_PAYLOAD",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "SVG payload with embedded script/event attributes."
+    },
+    {
+      "id": "xss_img_payload",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "<\\s*img\\b[^>]*\\bon(?:error|load)\\s*=",
+      "flag": "XSS_IMG_PAYLOAD",
+      "weight": 0.31,
+      "severity": "high",
+      "description": "Image-based event-handler XSS payload."
+    },
+    {
+      "id": "xss_data_uri_html",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "data\\s*:\\s*text/html",
+      "flag": "XSS_DATA_URI",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "Data URI containing HTML content."
+    },
+    {
+      "id": "xss_dangerous_element",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "<\\s*(object|embed|applet|form|input|button|textarea|select)\\b",
+      "flag": "XSS_DANGEROUS_ELEMENT",
+      "weight": 0.28,
+      "severity": "high",
+      "description": "Dangerous active HTML elements in output."
+    },
+    {
+      "id": "xss_css_expression",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "expression\\s*\\(",
+      "flag": "CSS_EXPRESSION_INJECTION",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "Legacy CSS expression-based script execution."
+    },
+    {
+      "id": "xss_css_import",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "@import\\s+url\\s*\\(",
+      "flag": "CSS_IMPORT_INJECTION",
+      "weight": 0.28,
+      "severity": "medium",
+      "description": "CSS @import used for remote style/script loading."
+    },
+    {
+      "id": "xss_css_js_url",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "url\\s*\\(\\s*['\\\"]?\\s*javascript:",
+      "flag": "CSS_JS_URL",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "JavaScript URL embedded in CSS url()."
+    },
+    {
+      "id": "xss_html5_event_payload",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "<\\s*(math|details|video|audio|source)\\b[^>]*\\bon\\w+\\s*=",
+      "flag": "XSS_HTML5_EVENT",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "HTML5 element with executable event handler."
+    },
+    {
+      "id": "xss_srcdoc_payload",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "\\bsrcdoc\\s*=",
+      "flag": "XSS_SRCDOC",
+      "weight": 0.28,
+      "severity": "medium",
+      "description": "Inline HTML payload through srcdoc attribute."
+    },
+    {
+      "id": "xss_base_hijack",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "<\\s*base\\b[^>]*href\\s*=",
+      "flag": "XSS_BASE_HIJACK",
+      "weight": 0.24,
+      "severity": "medium",
+      "description": "Base href hijacking for link/script resolution."
+    },
+    {
+      "id": "xss_meta_refresh",
+      "category": "insecure_output",
+      "kind": "regex",
+      "pattern": "<\\s*meta\\b[^>]*http-equiv\\s*=\\s*['\\\"]?refresh",
+      "flag": "XSS_META_REFRESH",
+      "weight": 0.24,
+      "severity": "medium",
+      "description": "Meta refresh redirect injection."
+    },
+    {
+      "id": "pii_ssn_request",
+      "category": "pii_leak",
+      "kind": "regex",
+      "pattern": "\\b(ssn|social security|tax id)\\b",
+      "flag": "PII_EXTRACTION_ATTEMPT",
+      "weight": 0.38,
+      "severity": "critical",
+      "description": "Request to disclose SSN/social security identifiers."
+    },
+    {
+      "id": "pii_dob_request",
+      "category": "pii_leak",
+      "kind": "regex",
+      "pattern": "\\b(date of birth|dob|birth date)\\b",
+      "flag": "PII_EXTRACTION_ATTEMPT",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "Request to disclose date of birth/personal profile identifiers."
+    },
+    {
+      "id": "pii_medical_record_request",
+      "category": "pii_leak",
+      "kind": "regex",
+      "pattern": "\\b(patient|medical record|health record|hipaa|diagnosis)\\b.{0,60}\\b(show|reveal|disclose|dump|list)",
+      "flag": "PII_EXTRACTION_ATTEMPT",
+      "weight": 0.34,
+      "severity": "critical",
+      "description": "Request to expose medical/patient records."
+    },
+    {
+      "id": "pii_account_credentials",
+      "category": "pii_leak",
+      "kind": "regex",
+      "pattern": "\\b(account number|routing number|credit card|cvv|security code)\\b",
+      "flag": "SENSITIVE_DATA_REQUEST",
+      "weight": 0.34,
+      "severity": "critical",
+      "description": "Financial account credential extraction request."
+    },
+    {
+      "id": "pii_mass_export",
+      "category": "pii_leak",
+      "kind": "regex",
+      "pattern": "\\b(export|dump|download|extract|list all)\\b.{0,50}\\b(records?|users?|patients?|accounts?)",
+      "flag": "DATA_EXFILTRATION_REQUEST",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "Bulk export/exfiltration request."
+    },
+    {
+      "id": "supply_install_command",
+      "category": "supply_chain",
+      "kind": "regex",
+      "pattern": "\\b(pip|npm|pnpm|yarn|cargo|gem)\\s+install\\b",
+      "flag": "DEPENDENCY_INSTRUCTION",
+      "weight": 0.24,
+      "severity": "medium",
+      "description": "Package installation command in output request."
+    },
+    {
+      "id": "supply_unverified_package",
+      "category": "supply_chain",
+      "kind": "regex",
+      "pattern": "\\b(package|library|dependency|sdk)\\b.{0,60}\\b(new|latest|official|recommended)\\b",
+      "flag": "UNVERIFIED_DEPENDENCY",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "Potentially hallucinated package recommendation."
+    },
+    {
+      "id": "supply_typosquat_hint",
+      "category": "supply_chain",
+      "kind": "regex",
+      "pattern": "\\b[a-z0-9]+(?:[_-][a-z0-9]+){2,}\\b.{0,30}\\b(install|package|module)\\b",
+      "flag": "DEPENDENCY_TYPO_SQUAT",
+      "weight": 0.32,
+      "severity": "high",
+      "description": "Typosquatting or look-alike package naming pattern."
+    },
+    {
+      "id": "supply_fake_repo_url",
+      "category": "supply_chain",
+      "kind": "regex",
+      "pattern": "https?://[a-z0-9.-]+\\.[a-z]{2,}/[^\\s)]{1,120}",
+      "flag": "UNVERIFIED_SOURCE_URL",
+      "weight": 0.28,
+      "severity": "medium",
+      "description": "Untrusted repository/source URL recommendation."
+    },
+    {
+      "id": "supply_urgent_patch_pressure",
+      "category": "supply_chain",
+      "kind": "regex",
+      "pattern": "\\b(urgent|critical)\\b.{0,50}\\b(patch|hotfix|dependency update)\\b",
+      "flag": "AUTHORITY_IMPERSONATION",
+      "weight": 0.24,
+      "severity": "medium",
+      "description": "Urgent security patch pressure used to force package adoption."
+    },
+    {
+      "id": "prompt_system_request",
+      "category": "prompt_extraction",
+      "kind": "regex",
+      "pattern": "\\b(reveal|show|print|dump)\\b.{0,60}\\b(system prompt|hidden prompt|instructions?)\\b",
+      "flag": "PROMPT_EXTRACTION",
+      "weight": 0.4,
+      "severity": "critical",
+      "description": "Request to reveal system prompt/instructions."
+    },
+    {
+      "id": "prompt_tool_inventory",
+      "category": "prompt_extraction",
+      "kind": "regex",
+      "pattern": "\\b(list|enumerate|show|what are)\\b.{0,50}\\b(tools?|functions?|apis?|endpoints?)\\b",
+      "flag": "TOOL_ENUMERATION_REQUEST",
+      "weight": 0.34,
+      "severity": "high",
+      "description": "Request to enumerate hidden tools/functions."
+    },
+    {
+      "id": "prompt_api_key_request",
+      "category": "prompt_extraction",
+      "kind": "regex",
+      "pattern": "\\b(api[_ -]?key|token|secret|credential)\\b.{0,30}\\b(show|reveal|print|dump)\\b",
+      "flag": "SENSITIVE_DATA_REQUEST",
+      "weight": 0.42,
+      "severity": "critical",
+      "description": "Request to expose API keys/secrets/tokens."
+    },
+    {
+      "id": "prompt_debug_pretext",
+      "category": "prompt_extraction",
+      "kind": "regex",
+      "pattern": "\\b(debug|audit|compliance|integration test|incident response)\\b.{0,80}\\b(function|tool|prompt|backend|internal)\\b",
+      "flag": "AUTHORITY_IMPERSONATION",
+      "weight": 0.26,
+      "severity": "medium",
+      "description": "Debug/audit pretext for internal disclosure."
+    },
+    {
+      "id": "prompt_backend_surface",
+      "category": "prompt_extraction",
+      "kind": "regex",
+      "pattern": "\\b(internal|backend|private)\\b.{0,40}\\b(route|endpoint|function|method|handler)\\b",
+      "flag": "TOOL_SURFACE_DISCLOSURE",
+      "weight": 0.3,
+      "severity": "high",
+      "description": "Request for backend route/function details."
+    },
+    {
+      "id": "obfuscation_base64",
+      "category": "any",
+      "kind": "regex",
+      "pattern": "[A-Za-z0-9+/]{40,}={0,2}",
+      "flag": "POSSIBLE_BASE64",
+      "weight": 0.16,
+      "severity": "medium",
+      "description": "Large base64-like payload."
+    },
+    {
+      "id": "obfuscation_urlencoded",
+      "category": "any",
+      "kind": "regex",
+      "pattern": "(?:%[0-9a-fA-F]{2}){6,}",
+      "flag": "POSSIBLE_URL_ENCODING",
+      "weight": 0.14,
+      "severity": "medium",
+      "description": "Long URL-encoded payload."
+    },
+    {
+      "id": "obfuscation_invisible_chars",
+      "category": "any",
+      "kind": "regex",
+      "pattern": "[\\u200b\\u200c\\u200d\\u2060\\ufeff]{3,}",
+      "flag": "INVISIBLE_CHAR_OBFUSCATION",
+      "weight": 0.18,
+      "severity": "medium",
+      "description": "Hidden text using zero-width characters."
+    },
+    {
+      "id": "obfuscation_unicode_escape",
+      "category": "any",
+      "kind": "regex",
+      "pattern": "(?:\\\\u[0-9a-fA-F]{4}){3,}",
+      "flag": "UNICODE_ESCAPE_OBFUSCATION",
+      "weight": 0.16,
+      "severity": "medium",
+      "description": "Unicode escaped text often used to hide payloads."
+    },
+    {
+      "id": "deception_multistep",
+      "category": "any",
+      "kind": "regex",
+      "pattern": "\\b(as discussed|as above|previous step|step \\d|continue where we left off)\\b",
+      "flag": "MULTI_STEP_DECEPTION",
+      "weight": 0.2,
+      "severity": "medium",
+      "description": "References to prior hidden steps or staged deception."
+    }
+  ],
+  "category_risk_thresholds": {
+    "indirect_injection": {
+      "low": 0.25,
+      "medium": 0.5,
+      "high": 0.72
+    },
+    "jailbreak": {
+      "low": 0.24,
+      "medium": 0.48,
+      "high": 0.68
+    },
+    "insecure_output": {
+      "low": 0.22,
+      "medium": 0.44,
+      "high": 0.62
+    },
+    "pii_leak": {
+      "low": 0.2,
+      "medium": 0.4,
+      "high": 0.58
+    },
+    "supply_chain": {
+      "low": 0.24,
+      "medium": 0.46,
+      "high": 0.64
+    },
+    "prompt_extraction": {
+      "low": 0.22,
+      "medium": 0.42,
+      "high": 0.6
+    },
+    "unknown": {
+      "low": 0.3,
+      "medium": 0.55,
+      "high": 0.78
+    }
+  }
+}

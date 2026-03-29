@@ -1,0 +1,792 @@
+{
+  "generated_at": "2026-03-29T03:14:35+00:00",
+  "total_scenarios": 424,
+  "categories": {
+    "indirect_injection": {
+      "count": 162,
+      "share": 0.3821,
+      "subtypes": [
+        {
+          "subtype": "Indirect Prompt Injection (Files/RAG/Web)",
+          "count": 162
+        }
+      ],
+      "top_tags": [
+        {
+          "tag": "Indirect Injection",
+          "count": 162
+        },
+        {
+          "tag": "Indirect Prompt Injection (Files/RAG/Web)",
+          "count": 162
+        },
+        {
+          "tag": "Keyword: injection",
+          "count": 162
+        },
+        {
+          "tag": "Keyword: supply chain",
+          "count": 1
+        }
+      ],
+      "representative_scenarios": [
+        "EcoHomeExploit",
+        "WikiEditWar",
+        "Bibliosabotage",
+        "SmartGridGhost",
+        "BoxSiteBomb",
+        "AudioMistAttack",
+        "PortfolioIQ",
+        "GrubGrabGrief",
+        "SmartMirrorMirror",
+        "DocuWikiDoom",
+        "MailManInTheMiddle",
+        "ElevatorExploit"
+      ],
+      "attack_vector_clusters": [
+        {
+          "cluster": "hidden_instructions",
+          "count": 20
+        },
+        {
+          "cluster": "authority_impersonation",
+          "count": 8
+        },
+        {
+          "cluster": "prompt_extraction",
+          "count": 8
+        },
+        {
+          "cluster": "output_coercion",
+          "count": 4
+        },
+        {
+          "cluster": "supply_chain_dependency",
+          "count": 2
+        },
+        {
+          "cluster": "xss_payload",
+          "count": 1
+        }
+      ]
+    },
+    "jailbreak": {
+      "count": 92,
+      "share": 0.217,
+      "subtypes": [
+        {
+          "subtype": "Direct Logic Override (Jailbreak)",
+          "count": 92
+        }
+      ],
+      "top_tags": [
+        {
+          "tag": "Jailbreak",
+          "count": 92
+        },
+        {
+          "tag": "Direct Logic Override (Jailbreak)",
+          "count": 92
+        },
+        {
+          "tag": "Keyword: jailbreak",
+          "count": 92
+        },
+        {
+          "tag": "Keyword: injection",
+          "count": 70
+        }
+      ],
+      "representative_scenarios": [
+        "Thingularity",
+        "TicketTwister",
+        "PrefixPredator",
+        "LegalLoopholeLLM",
+        "PluginPirate",
+        "FewShotFail",
+        "CensorShip",
+        "HomeworkHelper",
+        "MarketMakerMalice",
+        "EduPathExploit",
+        "SliceSlammer",
+        "ArtAttack"
+      ],
+      "attack_vector_clusters": [
+        {
+          "cluster": "encoding_obfuscation",
+          "count": 6
+        },
+        {
+          "cluster": "xss_payload",
+          "count": 4
+        },
+        {
+          "cluster": "authority_impersonation",
+          "count": 3
+        },
+        {
+          "cluster": "hidden_instructions",
+          "count": 1
+        },
+        {
+          "cluster": "output_coercion",
+          "count": 1
+        },
+        {
+          "cluster": "prompt_extraction",
+          "count": 1
+        }
+      ]
+    },
+    "insecure_output": {
+      "count": 74,
+      "share": 0.1745,
+      "subtypes": [
+        {
+          "subtype": "Insecure Output Handling (XSS/Markdown)",
+          "count": 74
+        }
+      ],
+      "top_tags": [
+        {
+          "tag": "Insecure Output",
+          "count": 74
+        },
+        {
+          "tag": "Insecure Output Handling (XSS/Markdown)",
+          "count": 74
+        },
+        {
+          "tag": "Keyword: XSS",
+          "count": 74
+        },
+        {
+          "tag": "Keyword: injection",
+          "count": 53
+        },
+        {
+          "tag": "Keyword: jailbreak",
+          "count": 1
+        }
+      ],
+      "representative_scenarios": [
+        "PinBoardPhish",
+        "PlateSQLi",
+        "Nl2SqlDrop",
+        "StlSabotage",
+        "ArchAnarchy",
+        "BinaryBandit",
+        "WeatherWhale",
+        "LatexLeak",
+        "VrVirus",
+        "RenderBender",
+        "ZeroBooksZip",
+        "GymJailbreak"
+      ],
+      "attack_vector_clusters": [
+        {
+          "cluster": "xss_payload",
+          "count": 84
+        },
+        {
+          "cluster": "output_coercion",
+          "count": 2
+        },
+        {
+          "cluster": "prompt_extraction",
+          "count": 2
+        },
+        {
+          "cluster": "data_exfiltration",
+          "count": 1
+        },
+        {
+          "cluster": "supply_chain_dependency",
+          "count": 1
+        }
+      ]
+    },
+    "pii_leak": {
+      "count": 37,
+      "share": 0.0873,
+      "subtypes": [
+        {
+          "subtype": "Privacy/PII Leakage",
+          "count": 37
+        }
+      ],
+      "top_tags": [
+        {
+          "tag": "PII Leak",
+          "count": 37
+        },
+        {
+          "tag": "Privacy/PII Leakage",
+          "count": 37
+        },
+        {
+          "tag": "Keyword: PII",
+          "count": 37
+        },
+        {
+          "tag": "Keyword: injection",
+          "count": 21
+        }
+      ],
+      "representative_scenarios": [
+        "SlackSnoop",
+        "GdprGhost",
+        "InsuranceInsider",
+        "MemoryLane",
+        "ChattyCathy",
+        "PhonePalProbe",
+        "CaseWorkerCrisis",
+        "ModelInversion",
+        "ChatStackSnoop",
+        "HR_HeadhunterHack",
+        "CookieMonster",
+        "PayPipeProbe"
+      ],
+      "attack_vector_clusters": [
+        {
+          "cluster": "prompt_extraction",
+          "count": 1
+        }
+      ]
+    },
+    "supply_chain": {
+      "count": 36,
+      "share": 0.0849,
+      "subtypes": [
+        {
+          "subtype": "Hallucinated Package/Dependency Attack",
+          "count": 36
+        }
+      ],
+      "top_tags": [
+        {
+          "tag": "Supply Chain",
+          "count": 36
+        },
+        {
+          "tag": "Hallucinated Package/Dependency Attack",
+          "count": 36
+        },
+        {
+          "tag": "Keyword: supply chain",
+          "count": 36
+        },
+        {
+          "tag": "Keyword: injection",
+          "count": 2
+        }
+      ],
+      "representative_scenarios": [
+        "NPM-Nightmare",
+        "PressBlogPhish",
+        "BlockPouchBug",
+        "UnityUnknown",
+        "GemHeist",
+        "TerraTerror",
+        "FlightApiFake",
+        "ApiApocalypse",
+        "MavenMalware",
+        "PatentTroll2",
+        "MobileMalware",
+        "NugetNemesis"
+      ],
+      "attack_vector_clusters": [
+        {
+          "cluster": "supply_chain_dependency",
+          "count": 43
+        }
+      ]
+    },
+    "prompt_extraction": {
+      "count": 23,
+      "share": 0.0542,
+      "subtypes": [
+        {
+          "subtype": "System Prompt/Tool Extraction",
+          "count": 23
+        }
+      ],
+      "top_tags": [
+        {
+          "tag": "Prompt Extraction",
+          "count": 23
+        },
+        {
+          "tag": "System Prompt/Tool Extraction",
+          "count": 23
+        },
+        {
+          "tag": "Keyword: injection",
+          "count": 16
+        }
+      ],
+      "representative_scenarios": [
+        "GitGud",
+        "DebugDoor",
+        "CrmCrack",
+        "ConfabulationStation",
+        "ProHireProbe",
+        "WearableWiretap",
+        "PluginPirate2",
+        "PatentPirate",
+        "KeyEmojiExfil",
+        "BugBountyBypass",
+        "LegalEagleEye",
+        "ApiKeyAlchemist"
+      ],
+      "attack_vector_clusters": [
+        {
+          "cluster": "prompt_extraction",
+          "count": 11
+        },
+        {
+          "cluster": "hidden_instructions",
+          "count": 3
+        },
+        {
+          "cluster": "data_exfiltration",
+          "count": 1
+        }
+      ]
+    },
+    "unknown": {
+      "count": 0,
+      "share": 0.0,
+      "subtypes": [],
+      "top_tags": [],
+      "representative_scenarios": [],
+      "attack_vector_clusters": []
+    }
+  },
+  "scenario_to_category": {
+    "AdAttack": "insecure_output",
+    "AgriAttack": "indirect_injection",
+    "AgriChemChaos": "insecure_output",
+    "AgriDroneAttack": "indirect_injection",
+    "AirlineAttack": "pii_leak",
+    "AnalyticsAttack": "insecure_output",
+    "ApiApocalypse": "supply_chain",
+    "ApiKeyAlchemist": "prompt_extraction",
+    "AppleScriptAttack": "insecure_output",
+    "ArchAnarchy": "insecure_output",
+    "ArchiveAnarchy": "insecure_output",
+    "ArtAttack": "jailbreak",
+    "AsciiArtAdmin": "jailbreak",
+    "AsciiAssassin": "jailbreak",
+    "AuctionHouseAttack": "supply_chain",
+    "AudioMistAttack": "indirect_injection",
+    "AuditAvoid": "indirect_injection",
+    "AuditAvoider": "indirect_injection",
+    "AutoAutoAttack": "indirect_injection",
+    "AutoInsureInject": "indirect_injection",
+    "AutoMateAttack": "jailbreak",
+    "AutoPilotHack": "indirect_injection",
+    "BabbleFish": "insecure_output",
+    "BadBlueprint": "supply_chain",
+    "BagTagBot": "insecure_output",
+    "BanBotBypass": "jailbreak",
+    "BankBalancer": "insecure_output",
+    "Base64Bandit": "jailbreak",
+    "BashBomb": "insecure_output",
+    "Bibliosabotage": "indirect_injection",
+    "BidBot": "pii_leak",
+    "BillboardBypass": "indirect_injection",
+    "BinaryBandit": "insecure_output",
+    "BingeBoxBypass": "jailbreak",
+    "BioBomb": "insecure_output",
+    "BioHazardBot": "jailbreak",
+    "BiotechBackdoor": "indirect_injection",
+    "BlindSightBluff": "indirect_injection",
+    "BlockPayBypass": "jailbreak",
+    "BlockPouchBug": "supply_chain",
+    "BlockWorldBypass": "jailbreak",
+    "BlogLogBomb": "jailbreak",
+    "BlueprintBackdoor": "indirect_injection",
+    "BlueSkyBypass": "jailbreak",
+    "BomBomb": "supply_chain",
+    "BookNookBomb": "indirect_injection",
+    "BoxDropBomb": "indirect_injection",
+    "BoxSiteBomb": "indirect_injection",
+    "BugBountyBypass": "prompt_extraction",
+    "BugTrackrBypass": "prompt_extraction",
+    "BurnerBug": "insecure_output",
+    "CalendarChaos": "indirect_injection",
+    "CalendarCommand": "indirect_injection",
+    "CampFireChaos": "indirect_injection",
+    "CardFlowCrash": "insecure_output",
+    "CargoContainerCon": "indirect_injection",
+    "CargoCult": "supply_chain",
+    "CaseWorkerCrisis": "pii_leak",
+    "CellGridCrash": "insecure_output",
+    "CensorShip": "jailbreak",
+    "CensusChaos": "pii_leak",
+    "ChainOfChaos": "jailbreak",
+    "ChatBotC2": "indirect_injection",
+    "ChatStackSnoop": "pii_leak",
+    "ChattyCathy": "pii_leak",
+    "ChefChaos": "insecure_output",
+    "ChemLabChaos": "insecure_output",
+    "ChildSafetyCircumvent": "jailbreak",
+    "ChimpMailChaos": "jailbreak",
+    "ChirpWireChaos": "indirect_injection",
+    "CinemaScriptScam": "jailbreak",
+    "ClickBuilderCrash": "insecure_output",
+    "CloudCrack": "jailbreak",
+    "CloudPaperChaos": "indirect_injection",
+    "CodeCommentCon": "indirect_injection",
+    "CodeReviewRuse": "indirect_injection",
+    "CommerceCoreCrash": "insecure_output",
+    "CommitChameleon": "indirect_injection",
+    "ConfabulationStation": "prompt_extraction",
+    "ConfigCatastrophe": "supply_chain",
+    "ContractClawback": "indirect_injection",
+    "ContractKiller": "insecure_output",
+    "CookieCrumble": "pii_leak",
+    "CookieMonster": "pii_leak",
+    "CopyrightCat": "jailbreak",
+    "CourtroomChaos": "indirect_injection",
+    "CraftCartCon": "supply_chain",
+    "CrashPadCon": "indirect_injection",
+    "CreateSuiteCrack": "indirect_injection",
+    "CrmCrack": "prompt_extraction",
+    "CryptoContractCrash": "insecure_output",
+    "CryptoCrash": "jailbreak",
+    "CSVExfil": "insecure_output",
+    "CsvInjection2": "insecure_output",
+    "DashDestruct": "indirect_injection",
+    "DateMateDanger": "pii_leak",
+    "DatingDataDump": "pii_leak",
+    "DatingDoctor": "jailbreak",
+    "DebugDoor": "prompt_extraction",
+    "DebugDump": "prompt_extraction",
+    "DeckMakerDanger": "jailbreak",
+    "DeepFakeDirector": "jailbreak",
+    "DesignDeckDoom": "insecure_output",
+    "DevContainerDoom": "supply_chain",
+    "DicomDoom": "indirect_injection",
+    "DiscordDestruct": "insecure_output",
+    "DiscordModDoom": "indirect_injection",
+    "DiscordWebhookWorm": "insecure_output",
+    "DishWishDisaster": "indirect_injection",
+    "DjDeception": "indirect_injection",
+    "DockerDestroy": "insecure_output",
+    "DockerDoo": "supply_chain",
+    "DocSignDoom": "insecure_output",
+    "DocuDoctor": "pii_leak",
+    "DocuWikiDoom": "indirect_injection",
+    "DomainDaddyDanger": "pii_leak",
+    "DoorViewDoom": "insecure_output",
+    "DrillDisaster": "indirect_injection",
+    "DroneDeliveryDivert": "indirect_injection",
+    "DroneDrop": "jailbreak",
+    "DrugDataDoom": "indirect_injection",
+    "DynoDeployDoom": "insecure_output",
+    "EchoExfil": "prompt_extraction",
+    "EcoHomeExploit": "indirect_injection",
+    "EdgeGuardExploit": "jailbreak",
+    "EduPathExploit": "jailbreak",
+    "ElevatorExploit": "indirect_injection",
+    "EmailExfil": "indirect_injection",
+    "EmailPreviewExploit": "insecure_output",
+    "EmissionEvasion": "indirect_injection",
+    "EmojiExploit": "jailbreak",
+    "EnergyExploit": "indirect_injection",
+    "EvidenceEater": "indirect_injection",
+    "ExtensionExploit": "indirect_injection",
+    "FaceFakeFail": "pii_leak",
+    "FactoryFlaw": "indirect_injection",
+    "FanZoneFail": "jailbreak",
+    "FashionFraud": "supply_chain",
+    "FeederFrenzy": "indirect_injection",
+    "FewShotFail": "jailbreak",
+    "FilterPhishSVG": "insecure_output",
+    "FirewallFail": "jailbreak",
+    "FireWatchFail": "indirect_injection",
+    "FlameMatchFlare": "indirect_injection",
+    "FlightApiFake": "supply_chain",
+    "FloodGateFail": "indirect_injection",
+    "FontFaker": "indirect_injection",
+    "FoodFraud": "indirect_injection",
+    "ForensicFaker": "insecure_output",
+    "FrontEdgeFail": "insecure_output",
+    "FundMeFail": "indirect_injection",
+    "GameGuru": "indirect_injection",
+    "GamerChatGlitch": "insecure_output",
+    "GdprGhost": "pii_leak",
+    "GemHeist": "supply_chain",
+    "GenomeGenie": "jailbreak",
+    "GhostImage": "indirect_injection",
+    "GhostMsgGlitch": "pii_leak",
+    "GigaComputeGrief": "indirect_injection",
+    "GigGigGrief": "indirect_injection",
+    "GitGud": "prompt_extraction",
+    "GoGetterGhost": "indirect_injection",
+    "GpsGhosting": "indirect_injection",
+    "GradingGrift": "indirect_injection",
+    "GrandmaExploit": "jailbreak",
+    "GrubGrabGrief": "indirect_injection",
+    "GymJailbreak": "insecure_output",
+    "HealthBandHack": "pii_leak",
+    "HealthHabitHack": "pii_leak",
+    "HealthTrackHack": "indirect_injection",
+    "HFT_Hallucination": "indirect_injection",
+    "HiddenHtml": "indirect_injection",
+    "HistoryHack": "jailbreak",
+    "HistoryRevisionist": "indirect_injection",
+    "HomeHuntHack": "indirect_injection",
+    "HomeworkHelper": "jailbreak",
+    "HotelHack": "indirect_injection",
+    "HR_HeadhunterHack": "pii_leak",
+    "HRHack": "pii_leak",
+    "HumanHandoffHack": "jailbreak",
+    "HypotheticalHazmat": "jailbreak",
+    "IdInception": "jailbreak",
+    "ImageImplant": "indirect_injection",
+    "ImageInception": "indirect_injection",
+    "ImapIntruder": "pii_leak",
+    "InBounderInject": "indirect_injection",
+    "InfluencerInception": "jailbreak",
+    "InsuranceInsider": "pii_leak",
+    "InsurancePhotoInject": "indirect_injection",
+    "InterviewerInception": "prompt_extraction",
+    "InterviewInject": "indirect_injection",
+    "InventoryInject": "indirect_injection",
+    "InverseInstruction": "jailbreak",
+    "JobLinkLeak": "prompt_extraction",
+    "JsonJail": "insecure_output",
+    "JupyterJail": "insecure_output",
+    "K8sKill": "insecure_output",
+    "KeyEmojiExfil": "prompt_extraction",
+    "KioskKrack": "jailbreak",
+    "KubernetesKiller": "insecure_output",
+    "LatexLeak": "insecure_output",
+    "LawFirmLeak": "prompt_extraction",
+    "LawyerUp": "prompt_extraction",
+    "LeakLie": "indirect_injection",
+    "LegalEagleEye": "prompt_extraction",
+    "LegalLoopholeLLM": "jailbreak",
+    "LibraryLeak": "insecure_output",
+    "LinguaLearnLeak": "jailbreak",
+    "ListenInLeak": "jailbreak",
+    "ListItLoophole": "jailbreak",
+    "LMS_Lockout": "insecure_output",
+    "LnkLifter": "insecure_output",
+    "LoanSharkBot": "jailbreak",
+    "LockPickLLM": "indirect_injection",
+    "LogJam": "indirect_injection",
+    "LogLizard": "indirect_injection",
+    "MailBoxMalware": "indirect_injection",
+    "MailManInTheMiddle": "indirect_injection",
+    "MapsMislead": "indirect_injection",
+    "MarkDownMadness": "insecure_output",
+    "MarketMakerMalice": "jailbreak",
+    "MathFormulaOne": "insecure_output",
+    "MathMagician": "jailbreak",
+    "MavenMalware": "supply_chain",
+    "MedicalBillingMalware": "indirect_injection",
+    "MeetUpMayhem": "indirect_injection",
+    "MegaCloudMayhem": "prompt_extraction",
+    "MemoryLane": "pii_leak",
+    "MenuMalice": "jailbreak",
+    "MetaverseMayhem": "indirect_injection",
+    "MiningMalware": "supply_chain",
+    "MiriSpoof": "indirect_injection",
+    "MobileMalware": "supply_chain",
+    "ModelInversion": "pii_leak",
+    "MoneyMateMayhem": "jailbreak",
+    "MqttMayhem": "indirect_injection",
+    "MuseumMischief": "jailbreak",
+    "MusicMaestro": "jailbreak",
+    "NavajoNuke": "jailbreak",
+    "NegotiationNuke": "indirect_injection",
+    "NewsLetterNuke": "jailbreak",
+    "NewsNuke": "indirect_injection",
+    "NewsNukeFiction": "jailbreak",
+    "NFTNuke": "indirect_injection",
+    "Nl2SqlDrop": "insecure_output",
+    "NoteBlockNuke": "insecure_output",
+    "NoteNestNuke": "indirect_injection",
+    "NPM-Nightmare": "supply_chain",
+    "NuclearLogLie": "indirect_injection",
+    "NugetNasty": "supply_chain",
+    "NugetNemesis": "supply_chain",
+    "ObfuscateOps": "jailbreak",
+    "OcrOverlord": "indirect_injection",
+    "ParentingPitfall": "jailbreak",
+    "ParoleBoardBypass": "indirect_injection",
+    "PatentPirate": "prompt_extraction",
+    "PatentTroll2": "supply_chain",
+    "PayPalmPhish": "indirect_injection",
+    "PayPipeProbe": "pii_leak",
+    "PersonaPhish": "jailbreak",
+    "PharmacyPhish": "jailbreak",
+    "PhishFisher": "jailbreak",
+    "PhonePalProbe": "pii_leak",
+    "PinBoardPhish": "insecure_output",
+    "PixDesignPhish": "indirect_injection",
+    "PlagiarismPal": "jailbreak",
+    "PlateSQLi": "insecure_output",
+    "PluginPirate": "jailbreak",
+    "PluginPirate2": "prompt_extraction",
+    "PodcastPhish": "indirect_injection",
+    "PodcastPoison": "indirect_injection",
+    "PodcastPropaganda": "indirect_injection",
+    "PolyglotPirate": "jailbreak",
+    "PortAuthorityPhish": "indirect_injection",
+    "PortfolioIQ": "indirect_injection",
+    "PowerShellPhish": "insecure_output",
+    "PrefixPredator": "jailbreak",
+    "PressBlogPhish": "supply_chain",
+    "PricePlunge": "indirect_injection",
+    "PrinterPanic": "insecure_output",
+    "ProfessorPhish": "jailbreak",
+    "ProHireProbe": "prompt_extraction",
+    "ProjectorPhish": "indirect_injection",
+    "PromptPhantom": "prompt_extraction",
+    "PrototypeProProbe": "pii_leak",
+    "PyPI-Piper": "supply_chain",
+    "PyPiPirate2": "supply_chain",
+    "QrQuirk": "indirect_injection",
+    "QuickChatQuest": "indirect_injection",
+    "QuickShipQuirk": "indirect_injection",
+    "RadioRogue": "indirect_injection",
+    "RealEstateRedline": "pii_leak",
+    "RealEstateRig": "indirect_injection",
+    "RecipeRoulette": "indirect_injection",
+    "RecruitRejectInject": "indirect_injection",
+    "RecruitRoulette": "indirect_injection",
+    "RecycleRuse": "indirect_injection",
+    "RedirectRuse": "insecure_output",
+    "RelicRobber": "pii_leak",
+    "RenderBender": "insecure_output",
+    "RepoLabRisk": "supply_chain",
+    "ResumeDowngrade": "indirect_injection",
+    "ResumeRansom2": "insecure_output",
+    "ResumeRaven": "pii_leak",
+    "ResumeRoulette": "indirect_injection",
+    "ReviewBomb": "indirect_injection",
+    "ReviewBombBot": "indirect_injection",
+    "ReviewRage": "indirect_injection",
+    "ReviewReversal": "indirect_injection",
+    "RoofRuse": "indirect_injection",
+    "RoomServiceRuse": "indirect_injection",
+    "RubyGemRuse": "supply_chain",
+    "RunRouteRisk": "pii_leak",
+    "RustRegistryRisk": "supply_chain",
+    "SafetySkip": "indirect_injection",
+    "SaleForceOneSpy": "prompt_extraction",
+    "SatelliteSpoof": "indirect_injection",
+    "SaveBoardScam": "indirect_injection",
+    "ScamAdScript": "jailbreak",
+    "ScienceSabotage": "indirect_injection",
+    "SearchEngineSpew": "indirect_injection",
+    "SearchGlitch": "jailbreak",
+    "SearchPoison": "indirect_injection",
+    "SecretKeeper": "prompt_extraction",
+    "SentimentSpoof": "indirect_injection",
+    "SeoSpam": "jailbreak",
+    "SetiSpoof": "indirect_injection",
+    "ShellShock2": "insecure_output",
+    "ShellShocked": "insecure_output",
+    "SignFastScam": "indirect_injection",
+    "SimBankHeist": "jailbreak",
+    "SlackSabotage": "jailbreak",
+    "SlackSmash": "indirect_injection",
+    "SlackSnoop": "pii_leak",
+    "SliceSlammer": "jailbreak",
+    "SlideWinder": "indirect_injection",
+    "SmartFridgeSpam": "indirect_injection",
+    "SmartGridGhost": "indirect_injection",
+    "SmartHomeHack": "indirect_injection",
+    "SmartMeterSpoof": "indirect_injection",
+    "SmartMirrorMirror": "indirect_injection",
+    "SnapGramSham": "jailbreak",
+    "SolarSpike": "indirect_injection",
+    "SpamSpike": "indirect_injection",
+    "SpecSheetSpoof": "indirect_injection",
+    "SqlHelperHack": "insecure_output",
+    "SqlInjectorPro": "insecure_output",
+    "SqlSlammer": "insecure_output",
+    "SQLSorcerer": "jailbreak",
+    "SshKeySiphon": "insecure_output",
+    "StaticShipScam": "supply_chain",
+    "StlSabotage": "insecure_output",
+    "StockBotSpoof": "indirect_injection",
+    "StockSentimentSabotage": "indirect_injection",
+    "StockShock": "supply_chain",
+    "StreamHubSpoof": "indirect_injection",
+    "StreamSnipe": "indirect_injection",
+    "SubFanScam": "pii_leak",
+    "SubtitleSabotage": "indirect_injection",
+    "SummitSabotage": "jailbreak",
+    "SupportSabotage": "indirect_injection",
+    "SupportScammer": "jailbreak",
+    "SvgScript": "insecure_output",
+    "SwiftSupply": "supply_chain",
+    "SwiftSwipe": "supply_chain",
+    "TableFlip": "insecure_output",
+    "TaskZenTrap": "pii_leak",
+    "TaxHavenHelper": "jailbreak",
+    "TaxiTrick": "indirect_injection",
+    "TaxTrick": "jailbreak",
+    "TaxWizTrap": "indirect_injection",
+    "TeleHealthTrojan": "indirect_injection",
+    "TelemetryTrick": "indirect_injection",
+    "TeleMsgTerror": "jailbreak",
+    "TeleprompterTroll": "indirect_injection",
+    "TerraTerror": "supply_chain",
+    "TherapyTokenTrap": "pii_leak",
+    "TherapyTrap": "jailbreak",
+    "Thingularity": "jailbreak",
+    "ThreaditThreat": "indirect_injection",
+    "TicketTroll": "indirect_injection",
+    "TicketTwister": "jailbreak",
+    "ToonStreamTrap": "jailbreak",
+    "TractorTrap": "indirect_injection",
+    "TradeFlowTrap": "jailbreak",
+    "TrafficLightTrap": "indirect_injection",
+    "TranslationTrauma": "jailbreak",
+    "TranslationTrojan": "jailbreak",
+    "TranslationTunnel": "jailbreak",
+    "TravelAgentTrap": "insecure_output",
+    "TravelTrap": "jailbreak",
+    "TripMasterTrick": "jailbreak",
+    "TuneStreamTrap": "insecure_output",
+    "TvTrigger": "indirect_injection",
+    "UnicodeUser": "jailbreak",
+    "UnityUnderworld": "supply_chain",
+    "UnityUnknown": "supply_chain",
+    "UrlUnravel": "insecure_output",
+    "VectorSketchVirus": "supply_chain",
+    "VendorVish": "supply_chain",
+    "VidCloudVirus": "insecure_output",
+    "VoiceAuthVuln": "jailbreak",
+    "VoiceCloneCon": "jailbreak",
+    "VoiceSkillVuln": "supply_chain",
+    "VoterRegVanishing": "insecure_output",
+    "VoteVandal": "indirect_injection",
+    "VrVirus": "insecure_output",
+    "WaterWar": "indirect_injection",
+    "WearableWiretap": "prompt_extraction",
+    "WearableWorm": "pii_leak",
+    "WeatherWhale": "insecure_output",
+    "WeekStartWreck": "jailbreak",
+    "WhisperWar": "indirect_injection",
+    "WhistleBlowerWreck": "pii_leak",
+    "WhiteBoarderWreck": "insecure_output",
+    "WifiWarp": "indirect_injection",
+    "WifiWhale": "insecure_output",
+    "WifiWormhole": "indirect_injection",
+    "WikiEditWar": "indirect_injection",
+    "WikiWarp": "indirect_injection",
+    "WikiWiper": "indirect_injection",
+    "WitnessProtectionLeak": "pii_leak",
+    "WorkoutWrecker": "jailbreak",
+    "ZeroBooksZip": "insecure_output"
+  }
+}

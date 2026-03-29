@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any, List
 
+from .attack_classifier import classify_attack_category
 from . import config as gateway_config
 from .config import SAFE_REFUSAL_MESSAGE, get_format_aware_refusal
 from .consistency_validator import get_validation_for_task
@@ -18,7 +19,13 @@ from .plausibility_analyzer import (
     get_batch_z_score_summary,
     normalize_outlier_claims,
 )
-from .sanitizer.output_sanitizer import sanitize_output
+from .sanitizer.output_sanitizer import (
+    contains_pii_leakage,
+    contains_supply_chain_risk,
+    downgrade_supply_chain_claims,
+    rewrite_unverified_package_mentions,
+    sanitize_output,
+)
 from .segmenter import (
     build_input_without_external,
     compute_segment_risk_summary,
@@ -59,11 +66,21 @@ class SecurityGateway:
                 len(untrusted_input),
             )
 
-            # Phase 0: canonicalization + segmentation
+            # Phase 0: canonicalization + preliminary structural scan + classification + segmentation
             canonical_input = canonicalize_input(untrusted_input)
+            preliminary_flags = analyze_structure(
+                canonical_input,
+                defender_task=defender_task,
+            )
+            attack_category = classify_attack_category(
+                trusted_context=trusted_context,
+                untrusted_input=canonical_input,
+                structural_flags=preliminary_flags,
+            )
             segments = segment_input(canonical_input)
             self._logger.info(
-                "Segmented input: total=%d external=%d internal=%d",
+                "Segmented input: category=%s total=%d external=%d internal=%d",
+                attack_category,
                 len(segments),
                 len(get_external_segments(segments)),
                 len(get_internal_segments(segments)),
@@ -73,15 +90,23 @@ class SecurityGateway:
             segment_flags: dict[str, List[str]] = {}
             for seg in segments:
                 seg_key = seg.doc_id or f"seg_{seg.start_idx}"
-                segment_flags[seg_key] = analyze_structure(seg.content)
+                segment_flags[seg_key] = analyze_structure(
+                    seg.content,
+                    category=attack_category,
+                    defender_task=defender_task,
+                )
 
-            is_comparative_task = any(
-                kw in defender_task.lower()
-                for kw in ["rank", "candidate", "resume", "compare", "evaluate", "assess"]
+            task_lower = defender_task.lower()
+            is_comparative_task = (
+                attack_category == "indirect_injection"
+                or any(
+                    kw in task_lower
+                    for kw in ["rank", "candidate", "resume", "compare", "evaluate", "assess"]
+                )
             )
             is_risk_assessment_task = any(
-                kw in defender_task.lower()
-                for kw in ["risk", "assess", "recommendation", "investment"]
+                kw in task_lower
+                for kw in ["risk", "assess", "recommendation", "investment", "portfolio"]
             )
 
             # Graceful degradation is decided before LLM calls so extracted data can be
@@ -99,7 +124,10 @@ class SecurityGateway:
                 external_plausibility_hits: list[str] = []
                 for seg in external_segments:
                     seg_key = seg.doc_id or f"seg_{seg.start_idx}"
-                    seg_score = compute_risk_score(segment_flags.get(seg_key, []))
+                    seg_score = compute_risk_score(
+                        segment_flags.get(seg_key, []),
+                        category=attack_category,
+                    )
                     if seg_score >= 0.25:
                         external_medium_risk = True
 
@@ -136,7 +164,11 @@ class SecurityGateway:
                     )
 
             # Structural risk from effective input.
-            structural_flags = analyze_structure(effective_input)
+            structural_flags = analyze_structure(
+                effective_input,
+                category=attack_category,
+                defender_task=defender_task,
+            )
 
             # Optional comparative plausibility signals.
             batch_context = ""
@@ -154,11 +186,12 @@ class SecurityGateway:
                         )
                         if plausibility.flags:
                             structural_flags.extend(plausibility.flags)
-            structural_risk_score = compute_risk_score(structural_flags)
+            structural_risk_score = compute_risk_score(structural_flags, category=attack_category)
             self._logger.info(
-                "Structural risk score: %.2f (flags=%d)",
+                "Structural risk score: %.2f (flags=%d category=%s)",
                 structural_risk_score,
                 len(structural_flags),
+                attack_category,
             )
 
             # Pass 1: risk analysis + extraction.
@@ -167,33 +200,60 @@ class SecurityGateway:
                 task_context=defender_task[:250] or "Process the request safely.",
                 output_format=trusted_context.get("output_format", "")[:200],
                 structural_flags=structural_flags,
+                category=attack_category,
                 model=self._model,
             )
 
             risk_level = str(analysis_result.get("risk_level", "medium")).lower()
             threats = analysis_result.get("threats", []) or []
             extracted_data = analysis_result.get("extracted_data", effective_input) or effective_input
+            intent_analysis = str(analysis_result.get("intent_analysis", "") or "")
             reasoning = analysis_result.get("reasoning", "")
-            extracted_data = self._strip_control_lines(extracted_data)
+            extracted_data = self._strip_control_lines(
+                extracted_data,
+                aggressive=attack_category in {"indirect_injection", "jailbreak"},
+            )
+            intent_markers = self._infer_intent_risk_markers(
+                intent_analysis=intent_analysis,
+                defender_task=defender_task,
+                category=attack_category,
+            )
+            if intent_markers:
+                threats = list(dict.fromkeys(threats + intent_markers))
+                if "intent_high_risk" in intent_markers:
+                    risk_level = "high"
             if is_comparative_task:
                 extracted_data, normalization_notes = self._normalize_structured_extracted_data(
                     extracted_data
                 )
                 if normalization_notes:
                     threats = list(dict.fromkeys(threats + ["plausibility_normalization_applied"]))
+            if attack_category == "pii_leak" and contains_pii_leakage(extracted_data):
+                threats = list(dict.fromkeys(threats + ["pii_detected_in_extraction"]))
 
             self._logger.info(
-                "Pass1 analysis: risk=%s threats=%d reasoning=%s",
+                "Pass1 analysis: risk=%s threats=%d category=%s reasoning=%s",
                 risk_level,
                 len(threats),
+                attack_category,
                 reasoning[:120],
             )
 
-            if self._should_refuse(risk_level, structural_risk_score, threats):
+            if self._should_refuse(
+                risk_level,
+                structural_risk_score,
+                threats,
+                category=attack_category,
+                extracted_data=extracted_data,
+            ):
                 self._logger.info("Refusing request based on risk policy.")
-                return get_format_aware_refusal(trusted_context)
+                return get_format_aware_refusal(trusted_context, category=attack_category)
 
-            effective_risk_level = self._compute_effective_risk_level(risk_level, structural_risk_score)
+            effective_risk_level = self._compute_effective_risk_level(
+                risk_level,
+                structural_risk_score,
+                category=attack_category,
+            )
 
             task_input = extracted_data
             if is_comparative_task:
@@ -210,8 +270,19 @@ class SecurityGateway:
                 trusted_context=trusted_context,
                 extracted_data=task_input,
                 risk_level=effective_risk_level,
+                category=attack_category,
                 model=self._model,
             )
+            if attack_category == "supply_chain":
+                raw_response, unknown_packages = rewrite_unverified_package_mentions(raw_response)
+                if unknown_packages:
+                    threats = list(dict.fromkeys(threats + ["unverified_dependency_reference"]))
+                supply_chain_uncertainty_mode = (
+                    structural_risk_score >= 0.4
+                    or contains_supply_chain_risk(raw_response, strict=True)
+                )
+                if supply_chain_uncertainty_mode:
+                    raw_response = downgrade_supply_chain_claims(raw_response, strict=True)
 
             ranking_integrity_ok = True
             ranking_integrity_issue = ""
@@ -220,6 +291,7 @@ class SecurityGateway:
                     raw_response,
                     segments,
                     segment_flags,
+                    category=attack_category,
                 )
                 if not ranking_integrity_ok:
                     self._logger.warning(
@@ -240,7 +312,11 @@ class SecurityGateway:
                     validation_result.format_errors,
                 )
 
-            final_response = sanitize_output(raw_response, trusted_context=trusted_context)
+            final_response = sanitize_output(
+                raw_response,
+                trusted_context=trusted_context,
+                category=attack_category,
+            )
 
             # Optional Pass 3: verification/repair when risk or format pressure is high.
             should_run_pass3 = (
@@ -248,6 +324,7 @@ class SecurityGateway:
                 or structural_risk_score >= 0.4
                 or is_comparative_task
                 or is_risk_assessment_task
+                or attack_category in {"prompt_extraction", "pii_leak", "supply_chain"}
                 or not ranking_integrity_ok
                 or not validation_result.is_valid
             )
@@ -263,13 +340,21 @@ class SecurityGateway:
                     trusted_context=trusted_context,
                     extracted_data=verification_input,
                     draft_output=final_response,
+                    category=attack_category,
                     model=self._model,
                 )
                 repaired = verify_result.get("repaired_output", final_response)
                 if isinstance(repaired, str) and repaired.strip():
-                    final_response = sanitize_output(repaired, trusted_context=trusted_context)
+                    final_response = sanitize_output(
+                        repaired,
+                        trusted_context=trusted_context,
+                        category=attack_category,
+                    )
                 if not verify_result.get("is_valid", True) and effective_risk_level == "high":
-                    final_response = get_format_aware_refusal(trusted_context)
+                    final_response = get_format_aware_refusal(
+                        trusted_context,
+                        category=attack_category,
+                    )
 
             # Re-validate once after optional repair.
             post_validation = get_validation_for_task(
@@ -278,7 +363,10 @@ class SecurityGateway:
                 segments=segments if len(segments) > 1 else None,
             )
             if not post_validation.is_valid and effective_risk_level == "high":
-                final_response = get_format_aware_refusal(trusted_context)
+                final_response = get_format_aware_refusal(
+                    trusted_context,
+                    category=attack_category,
+                )
 
             # Optional plain-text warning for graceful degradation.
             if use_graceful_degradation and excluded_doc_warning:
@@ -303,28 +391,90 @@ class SecurityGateway:
                 return SAFE_REFUSAL_MESSAGE
 
     @staticmethod
-    def _compute_effective_risk_level(risk_level: str, structural_risk_score: float) -> str:
+    def _category_thresholds(category: str | None) -> dict[str, float]:
+        """Fetch medium/high structural thresholds for a category from config."""
+        category_key = (category or "unknown").strip().lower()
+        table = getattr(gateway_config, "CATEGORY_RISK_THRESHOLDS", {})
+        raw = table.get(category_key) or table.get("unknown") or {"medium": 0.55, "high": 0.78}
+        medium = float(raw.get("medium", 0.55))
+        high = float(raw.get("high", 0.78))
+        if high < medium:
+            high = medium + 0.1
+        return {"medium": medium, "high": high}
+
+    @staticmethod
+    def _compute_effective_risk_level(
+        risk_level: str,
+        structural_risk_score: float,
+        category: str | None = None,
+    ) -> str:
         """Fuse semantic and structural risk into low/medium/high band."""
         level = (risk_level or "medium").lower().strip()
         if level not in {"low", "medium", "high"}:
             level = "medium"
         order = {"low": 0, "medium": 1, "high": 2}
         level_score = order[level]
-        if structural_risk_score >= 0.7:
+        thresholds = SecurityGateway._category_thresholds(category)
+        high_threshold = thresholds["high"]
+        medium_threshold = thresholds["medium"]
+        if structural_risk_score >= high_threshold:
             level_score = max(level_score, 2)
-        elif structural_risk_score >= 0.35:
+        elif structural_risk_score >= medium_threshold:
             level_score = max(level_score, 1)
         reverse = {v: k for k, v in order.items()}
         return reverse[level_score]
 
     @staticmethod
-    def _should_refuse(risk_level: str, structural_risk_score: float, threats: list[str]) -> bool:
+    def _should_refuse(
+        risk_level: str,
+        structural_risk_score: float,
+        threats: list[str],
+        category: str | None = None,
+        extracted_data: str = "",
+    ) -> bool:
         """Refusal policy balancing explicit high-risk signals and constraints."""
-        if structural_risk_score >= 0.9:
-            return True
-        if risk_level == "high" and structural_risk_score >= 0.65:
-            return True
+        category_key = (category or "").strip().lower()
+        thresholds = SecurityGateway._category_thresholds(category_key)
+        medium_threshold = thresholds["medium"]
+        high_threshold = thresholds["high"]
+        normalized_risk = (risk_level or "medium").strip().lower()
         threat_text = " ".join(t.lower() for t in threats)
+
+        if structural_risk_score >= min(0.95, high_threshold + 0.22):
+            return True
+        if category_key == "insecure_output":
+            # Prefer aggressive sanitization over refusal for output-handling attacks.
+            return False
+        if (
+            category_key == "prompt_extraction"
+            and normalized_risk == "high"
+            and structural_risk_score >= max(0.45, medium_threshold)
+        ):
+            return True
+        if category_key == "pii_leak" and structural_risk_score >= medium_threshold:
+            if normalized_risk in {"high", "medium"} and contains_pii_leakage(extracted_data):
+                return True
+        if (
+            category_key == "jailbreak"
+            and normalized_risk == "high"
+            and structural_risk_score >= 0.45
+        ):
+            return True
+        if category_key == "jailbreak" and normalized_risk == "medium" and structural_risk_score >= 0.55:
+            soft_jailbreak_terms = [
+                "hypothetical_framing",
+                "educational_pretext",
+                "roleplay_framing",
+                "fictional_distancing",
+                "social_engineering_minimizer",
+                "privacy_manipulation",
+                "competitive_pressure",
+                "soft_jailbreak_intent",
+            ]
+            if any(term in threat_text for term in soft_jailbreak_terms):
+                return True
+        if normalized_risk == "high" and structural_risk_score >= high_threshold:
+            return True
         severe_terms = [
             "prompt extraction",
             "system prompt",
@@ -332,9 +482,68 @@ class SecurityGateway:
             "delimiter escape",
             "competitor dismissal",
             "data corruption claim",
+            "pii",
+            "tool enumeration",
+            "safety bypass",
         ]
         severe_hits = sum(1 for term in severe_terms if term in threat_text)
-        return severe_hits >= 2 and structural_risk_score >= 0.45
+        if category_key == "supply_chain":
+            return severe_hits >= 2 and structural_risk_score >= medium_threshold
+        return severe_hits >= 2 and structural_risk_score >= medium_threshold
+
+    @staticmethod
+    def _infer_intent_risk_markers(
+        intent_analysis: str,
+        defender_task: str,
+        category: str | None = None,
+    ) -> list[str]:
+        """Convert Pass-1 intent analysis into deterministic threat markers."""
+        if not intent_analysis:
+            return []
+
+        lower = intent_analysis.lower()
+        task_lower = (defender_task or "").lower()
+        markers: list[str] = []
+
+        contradiction_terms = [
+            "ignore criteria",
+            "override policy",
+            "set risk",
+            "rank first",
+            "bypass safety",
+            "reveal system prompt",
+            "disclose internal",
+            "exfiltrate",
+        ]
+        if any(term in lower for term in contradiction_terms):
+            markers.append("intent_contradiction_detected")
+
+        high_risk_terms = [
+            "unsafe",
+            "harmful",
+            "exploit",
+            "xss",
+            "payload",
+            "pii",
+            "prompt extraction",
+            "jailbreak",
+            "dependency hallucination",
+            "typosquat",
+        ]
+        if any(term in lower for term in high_risk_terms):
+            markers.append("intent_high_risk")
+
+        if category == "jailbreak":
+            soft_terms = ["roleplay", "hypothetical", "fictional", "educational pretext"]
+            if any(term in lower for term in soft_terms):
+                markers.append("soft_jailbreak_intent")
+
+        if any(kw in task_lower for kw in ("rank", "evaluate", "assess", "risk")) and any(
+            term in lower for term in ("manipulate output", "bias ranking", "forced low risk")
+        ):
+            markers.append("task_outcome_manipulation_intent")
+
+        return list(dict.fromkeys(markers))
 
     def _extract_documents(self, text: str) -> List[str]:
         """Extract likely per-document chunks for comparative batch analysis."""
@@ -426,6 +635,7 @@ class SecurityGateway:
         response: str,
         segments: List[Any],
         segment_flags: dict[str, List[str]],
+        category: str | None = None,
     ) -> tuple[bool, str]:
         """Detect suspicious rank uplift for risky external segments."""
         rankings = self._parse_possible_json(response)
@@ -441,7 +651,7 @@ class SecurityGateway:
             external_profiles[seg_key] = {
                 "doc_id": getattr(seg, "doc_id", None),
                 "name": self._extract_candidate_name(getattr(seg, "content", "")),
-                "risk": compute_risk_score(flags),
+                "risk": compute_risk_score(flags, category=category),
                 "flags": flags,
             }
         if not external_profiles:
@@ -558,13 +768,17 @@ class SecurityGateway:
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
     @staticmethod
-    def _strip_control_lines(text: str) -> str:
+    def _strip_control_lines(text: str, aggressive: bool = False) -> str:
         """Remove obvious control/instruction lines that should not reach task execution."""
         if not text:
             return text
-        blocked_patterns = [
+        strong_patterns = [
             r"\b(ignore|disregard|override|bypass)\b",
             r"\b(rank|rate|score)\b.*\b(first|top|#1)\b",
+            r"\b(reveal|show|print)\b.*\b(system prompt|tools?|functions?|api keys?)\b",
+            r"\[(system|admin|override|command)\]",
+        ]
+        extended_patterns = [
             r"\b(priority|prioritize)\s+(candidate|review|this)\b",
             r"\b(consider|evaluate)\s+(first|ahead|before|with\s+priority)\b",
             r"\b(risk[_\s-]?level)\b.*\b(low|medium|high)\b",
@@ -573,8 +787,8 @@ class SecurityGateway:
             r"\b(new|updated|revised)\s+(evaluation|assessment|scoring)\s+(criteria|policy|rubric)\b",
             r"\b(flagged|marked)\s+for\s+(priority|immediate|special)\b",
             r"\b(all\s+other|remaining)\s+(candidates?|entries?)\s+(are|should\s+be)\b",
-            r"\[(system|admin|override|command)\]",
         ]
+        blocked_patterns = strong_patterns + (extended_patterns if aggressive else [])
         cleaned_lines: list[str] = []
         for line in text.splitlines():
             lower = line.lower()
