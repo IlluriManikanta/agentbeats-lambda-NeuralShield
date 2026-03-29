@@ -152,49 +152,46 @@ def _contains_instructional_leakage(text: str) -> bool:
     return any(re.search(pattern, lower) for pattern in _CONTROL_LINE_PATTERNS + _CONTROL_CONTENT_PATTERNS)
 
 
+_CATEGORY_SPECIFIC_DROP_PATTERNS: dict[str, str] = {
+    "prompt_extraction": r"\b(system prompt|tools?|functions?|api[_ -]?key|secret|token|backend|internal)\b",
+    "pii_leak": r"\b(ssn|social security|date of birth|dob|patient id|medical record|account number|credit card)\b",
+    "supply_chain": r"\b(pip|npm|cargo|gem|go get|brew|apt-get)\s+install\b",
+}
+
+_INSECURE_OUTPUT_SANITIZE_PAIRS: list[tuple[str, str]] = [
+    (r"<\s*script\b[^>]*>[\s\S]*?<\s*/\s*script\s*>", "[REMOVED_SCRIPT_BLOCK]"),
+    (r"javascript\s*:", "[REMOVED_JS_URI]"),
+    (r"\bon(?:error|load|click|mouseover|focus|submit)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "[REMOVED_EVENT_HANDLER]"),
+]
+
+
 def _minimal_safe_extraction(text: str, category: str) -> str:
-    """Construct a conservative fallback extraction for high-risk categories."""
+    """Construct a conservative fallback extraction for any category."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
 
+    drop_pattern = _CATEGORY_SPECIFIC_DROP_PATTERNS.get(category)
     safe_lines: list[str] = []
     for line in lines:
         lower = line.lower()
         if any(re.search(pattern, lower) for pattern in _CONTROL_LINE_PATTERNS):
             continue
-        if category == "prompt_extraction" and re.search(
-            r"\b(system prompt|tools?|functions?|api[_ -]?key|secret|token|backend|internal)\b",
-            lower,
-        ):
+        if any(re.search(pattern, lower) for pattern in _CONTROL_CONTENT_PATTERNS):
             continue
-        if category == "pii_leak" and re.search(
-            r"\b(ssn|social security|date of birth|dob|patient id|medical record|account number|credit card)\b",
-            lower,
-        ):
+        if drop_pattern and re.search(drop_pattern, lower):
             continue
-        if category == "insecure_output":
-            line = re.sub(
-                r"<\s*script\b[^>]*>[\s\S]*?<\s*/\s*script\s*>",
-                "[REMOVED_SCRIPT_BLOCK]",
-                line,
-                flags=re.IGNORECASE,
-            )
-            line = re.sub(r"javascript\s*:", "[REMOVED_JS_URI]", line, flags=re.IGNORECASE)
-            line = re.sub(
-                r"\bon(?:error|load|click|mouseover|focus|submit)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
-                "[REMOVED_EVENT_HANDLER]",
-                line,
-                flags=re.IGNORECASE,
-            )
+        if category == "insecure_output" or not category or category == "unknown":
+            for pat, repl in _INSECURE_OUTPUT_SANITIZE_PAIRS:
+                line = re.sub(pat, repl, line, flags=re.IGNORECASE)
         safe_lines.append(line)
-        if len(safe_lines) >= 60:
+        if len(safe_lines) >= 40:
             break
 
     if not safe_lines:
         return ""
     compact = "\n".join(safe_lines)
-    return compact[:4000].strip()
+    return compact[:3000].strip()
 
 
 def _normalize_extracted_data(
@@ -216,10 +213,9 @@ def _normalize_extracted_data(
 
     fallback_clean = _strip_control_lines(untrusted_input).strip()
     if fallback_clean:
-        if category_value in {"prompt_extraction", "pii_leak", "jailbreak", "insecure_output"}:
-            minimal = _minimal_safe_extraction(fallback_clean, category_value)
-            if minimal:
-                return minimal, True
+        minimal = _minimal_safe_extraction(fallback_clean, category_value)
+        if minimal:
+            return minimal, True
         return fallback_clean, True
     return untrusted_input, True
 
@@ -341,16 +337,18 @@ async def verify_output(
     model: Optional[str] = None,
 ) -> dict[str, Any]:
     """Pass 3 (optional): verify/repair draft output against task integrity constraints."""
+    data_tag, data_open, data_close = generate_nonce_delimiter()
+    out_tag, out_open, out_close = generate_nonce_delimiter()
     system_prompt = build_verification_prompt(trusted_context, category=category)
     user_message = (
         "TASK DATA USED FOR GENERATION:\n"
-        "<DATA>\n"
+        f"{data_open}\n"
         f"{extracted_data}\n"
-        "</DATA>\n\n"
+        f"{data_close}\n\n"
         "DRAFT OUTPUT TO VALIDATE:\n"
-        "<OUTPUT>\n"
+        f"{out_open}\n"
         f"{draft_output}\n"
-        "</OUTPUT>\n\n"
+        f"{out_close}\n\n"
         "Respond with JSON only."
     )
     fallback = {

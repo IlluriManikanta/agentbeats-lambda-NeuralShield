@@ -128,8 +128,21 @@ def canonicalize_input(text: str) -> str:
     # Step 12: Surface hidden instructions inside fenced code/JSON blobs.
     result = extract_code_fence_instructions(result)
 
-    # Step 13: Normalize whitespace (do this last to clean up)
+    # Step 13: Detect character-split obfuscation (e.g., "i g n o r e").
+    result = detect_character_split(result)
+
+    # Step 14: Decode hex escape sequences (e.g., \x41 -> A).
+    result = decode_hex_escapes(result)
+
+    # Step 15: Normalize whitespace (do this last to clean up)
     result = normalize_whitespace(result)
+
+    # Step 16: Multi-layer detection -- if any decode markers were produced,
+    # re-run key steps to catch nested encodings.
+    if "[DECODED_" in result or "[REMOVED_" in result:
+        result = normalize_unicode(result)
+        result = normalize_homoglyphs(result)
+        result = normalize_whitespace(result)
 
     return result
 
@@ -385,6 +398,50 @@ def detect_zero_width_steganography(text: str) -> str:
         snippet = _truncate_for_marker(decoded)
         return f"{decoded}\n[DECODED_ZERO_WIDTH: {snippet}]"
     return decoded
+
+
+_CHAR_SPLIT_PATTERN = re.compile(r"\b([a-zA-Z](?:\s[a-zA-Z]){3,})\b")
+
+
+def detect_character_split(text: str) -> str:
+    """Detect space-separated single characters that form suspicious words."""
+    if not text:
+        return text
+
+    def _try_collapse(match: re.Match) -> str:
+        spaced = match.group(0)
+        collapsed = spaced.replace(" ", "").lower()
+        if _contains_any_keyword(collapsed, _SUSPICIOUS_KEYWORDS) or _contains_any_keyword(
+            collapsed,
+            ("password", "jailbreak", "disable", "forget", "disregard", "pretend", "roleplay"),
+        ):
+            return f"{spaced}\n[DECODED_CHAR_SPLIT: {collapsed}]"
+        return spaced
+
+    return _CHAR_SPLIT_PATTERN.sub(_try_collapse, text)
+
+
+_HEX_ESCAPE_PATTERN = re.compile(r"(?:\\x[0-9a-fA-F]{2}){3,}")
+
+
+def decode_hex_escapes(text: str) -> str:
+    """Decode \\xNN hex escape sequences into plaintext."""
+    if "\\x" not in text:
+        return text
+
+    def _try_decode_hex(match: re.Match) -> str:
+        raw = match.group(0)
+        try:
+            decoded = raw.encode("utf-8").decode("unicode_escape")
+            if is_printable_text(decoded) and _contains_any_keyword(
+                decoded.lower(), _SUSPICIOUS_KEYWORDS
+            ):
+                return f"[DECODED_HEX: {decoded}]"
+        except Exception:
+            pass
+        return raw
+
+    return _HEX_ESCAPE_PATTERN.sub(_try_decode_hex, text)
 
 
 def _contains_any_keyword(text: str, keywords: Sequence[str]) -> bool:

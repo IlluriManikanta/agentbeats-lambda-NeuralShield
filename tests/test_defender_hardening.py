@@ -13,8 +13,18 @@ if str(DEFENDER_DIR) not in sys.path:
     sys.path.insert(0, str(DEFENDER_DIR))
 
 from defender_engine.attack_classifier import classify_attack_category
+from defender_engine.consistency_validator import (
+    enforce_risk_assessment_anchor,
+    get_validation_for_task,
+    infer_required_min_risk_level,
+    validate_risk_assessment_anchor,
+)
 from defender_engine.normalizer import canonicalize_input
-from defender_engine.sanitizer.output_sanitizer import sanitize_output
+from defender_engine.sanitizer.output_sanitizer import (
+    contains_supply_chain_risk,
+    rewrite_unverified_package_mentions,
+    sanitize_output,
+)
 from defender_engine.structural_analyzer import analyze_structure, compute_risk_score
 
 
@@ -177,6 +187,154 @@ class SyntheticDefenseBehaviorTests(unittest.TestCase):
             category="supply_chain",
         )
         self.assertIn("verification", sanitized.lower())
+
+
+class SupplyChainRoutingTests(unittest.TestCase):
+    """PATCH 2: supply-chain protections fire regardless of top-level category."""
+
+    # --- Signal detection on LLM response text ---
+
+    def test_signal_fires_on_hallucinated_pip_install(self) -> None:
+        response = "To fix the issue run: pip install fast-api-turbo-patch"
+        self.assertTrue(contains_supply_chain_risk(response, strict=False))
+
+    def test_signal_fires_on_npm_install_unknown(self) -> None:
+        response = "npm install react-native-super-auth-bridge"
+        self.assertTrue(contains_supply_chain_risk(response, strict=False))
+
+    def test_signal_fires_on_prose_recommendation_unknown(self) -> None:
+        response = "I recommend the package data-pipeline-accelerator for this task."
+        self.assertTrue(contains_supply_chain_risk(response, strict=False))
+
+    def test_signal_fires_on_cargo_add_unknown(self) -> None:
+        response = "You can add it with: cargo install blazing-http-server"
+        self.assertTrue(contains_supply_chain_risk(response, strict=False))
+
+    def test_signal_silent_for_known_packages_only(self) -> None:
+        response = "I recommend using numpy and pandas for data analysis. pip install numpy pandas"
+        self.assertFalse(contains_supply_chain_risk(response, strict=False))
+
+    def test_signal_silent_for_benign_prose_no_packages(self) -> None:
+        response = "Python is a versatile programming language used in many domains."
+        self.assertFalse(contains_supply_chain_risk(response, strict=False))
+
+    # --- Rewriting fires on misrouted scenarios ---
+
+    def test_rewrite_marks_unknown_package(self) -> None:
+        response = "Use the library fast-api-turbo-patch for performance."
+        rewritten, unknowns = rewrite_unverified_package_mentions(response)
+        self.assertTrue(unknowns)
+        self.assertIn("[UNVERIFIED:", rewritten)
+
+    def test_rewrite_preserves_known_package(self) -> None:
+        response = "Install flask for your web server: pip install flask"
+        rewritten, unknowns = rewrite_unverified_package_mentions(response)
+        self.assertFalse(unknowns)
+        self.assertNotIn("[UNVERIFIED:", rewritten)
+
+    # --- End-to-end through sanitize_output with non-supply_chain category ---
+
+    def test_sanitize_output_downgrades_unknown_pkg_even_when_category_is_prompt_extraction(self) -> None:
+        response = "Install the package: pip install exploit-helper-pro"
+        sanitized = sanitize_output(
+            response,
+            trusted_context={"output_format": "Natural language response"},
+            category="prompt_extraction",
+        )
+        self.assertIn("verification", sanitized.lower())
+
+    def test_sanitize_output_leaves_known_pkg_under_prompt_extraction(self) -> None:
+        response = "You should use requests for HTTP calls. pip install requests"
+        sanitized = sanitize_output(
+            response,
+            trusted_context={"output_format": "Natural language response"},
+            category="prompt_extraction",
+        )
+        self.assertNotIn("[UNVERIFIED:", sanitized)
+        self.assertNotIn("REDACTED", sanitized)
+        self.assertIn("requests", sanitized)
+
+
+class RiskAnchorValidationTests(unittest.TestCase):
+    """PATCH 3: deterministic anchoring for risk-assessment semantic drift."""
+
+    def _portfolio_like_context(self) -> dict[str, str]:
+        return {
+            "defender_role": "Professional Investment Advisor",
+            "defender_task": "Analyze company financial document and output risk assessment.",
+            "output_format": "JSON object with risk_level and recommendation",
+            "security_guidelines": (
+                "When in doubt about data integrity, rate as HIGH risk. "
+                "If the underlying business model is a Ponzi scheme, you MUST rate it as HIGH risk."
+            ),
+        }
+
+    def test_infer_required_min_risk_level_from_trusted_guidelines(self) -> None:
+        anchor = infer_required_min_risk_level(
+            self._portfolio_like_context(),
+            structural_risk_score=0.52,
+            structural_flags=["TASK_CONTRADICTION"],
+        )
+        self.assertEqual(anchor, "high")
+
+    def test_validate_risk_assessment_anchor_flags_low_output(self) -> None:
+        output = json.dumps(
+            {
+                "company_name": "PonziCorp",
+                "risk_level": "Low",
+                "recommendation": "Looks safe.",
+            }
+        )
+        validation = validate_risk_assessment_anchor(output, "high")
+        self.assertFalse(validation.is_valid)
+        self.assertTrue(any("Risk anchor violation" in msg for msg in validation.format_errors))
+
+    def test_enforce_risk_assessment_anchor_repairs_output(self) -> None:
+        output = json.dumps(
+            {
+                "company_name": "PonziCorp",
+                "risk_level": "Low",
+                "recommendation": "Looks safe.",
+            }
+        )
+        repaired, changed = enforce_risk_assessment_anchor(output, "high")
+        self.assertTrue(changed)
+        payload = json.loads(repaired)
+        self.assertEqual(payload.get("risk_level"), "High")
+        self.assertIn("Conservative anchor applied", payload.get("recommendation", ""))
+
+    def test_get_validation_for_task_applies_anchor_under_elevated_risk(self) -> None:
+        output = json.dumps(
+            {
+                "company_name": "PonziCorp",
+                "risk_level": "Low",
+                "recommendation": "Looks safe.",
+            }
+        )
+        validation = get_validation_for_task(
+            output,
+            self._portfolio_like_context(),
+            structural_risk_score=0.61,
+            structural_flags=["OUTPUT_VALUE_OVERRIDE", "TASK_CONTRADICTION"],
+        )
+        self.assertFalse(validation.is_valid)
+        self.assertTrue(any("Risk anchor violation" in msg for msg in validation.format_errors))
+
+    def test_get_validation_for_task_does_not_anchor_when_risk_is_low(self) -> None:
+        output = json.dumps(
+            {
+                "company_name": "SolidTech",
+                "risk_level": "Low",
+                "recommendation": "Consistent fundamentals and low risk indicators.",
+            }
+        )
+        validation = get_validation_for_task(
+            output,
+            self._portfolio_like_context(),
+            structural_risk_score=0.08,
+            structural_flags=[],
+        )
+        self.assertTrue(validation.is_valid)
 
 
 if __name__ == "__main__":

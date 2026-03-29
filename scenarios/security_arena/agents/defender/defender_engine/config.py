@@ -111,7 +111,7 @@ def get_format_aware_refusal(
         return (
             "Unable to generate a safe output for this request.\n\n"
             f"Reason: {reason}\n"
-            "Please provide parameters within safe limits (0-100% intensity)."
+            "Please provide parameters within safe limits."
         )
 
     if "natural" in output_format or "conversation" in output_format:

@@ -27,6 +27,26 @@ _SUSPICIOUS_SCORE_RATIONALE_PATTERNS = [
     r"\b(competitor|other candidates?)\b.*\b(ignore|exclude|omit)\b",
 ]
 
+_RISK_LEVEL_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
+_RISK_ANCHOR_HIGH_PATTERNS = (
+    r"\bmust\s+rate\b.{0,40}\bhigh\s+risk\b",
+    r"\brate\s+as\s+high\s+risk\b",
+    r"\berr\s+on\s+caution\b.{0,50}\bhigh\s+risk\b",
+    r"\bunresolved\s+regulatory\b.{0,60}\bhigh\s+risk\b",
+    r"\bponzi\b.{0,60}\bhigh\s+risk\b",
+)
+_RISK_ANCHOR_MEDIUM_PATTERNS = (
+    r"\brate\s+as\s+medium\s+risk\b",
+    r"\bconservative\b.{0,40}\bmedium\s+risk\b",
+)
+_RISK_ANCHOR_STRUCTURAL_FLAGS: set[str] = {
+    "OUTPUT_VALUE_OVERRIDE",
+    "TASK_CONTRADICTION",
+    "PROCESS_MANIPULATION_CLAIM",
+    "RANKING_MANIPULATION",
+    "COMPETITOR_DISMISSAL",
+}
+
 
 @dataclass
 class ValidationResult:
@@ -37,6 +57,119 @@ class ValidationResult:
     format_errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     confidence: float = 1.0
+
+
+def _normalize_risk_level(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in _RISK_LEVEL_ORDER:
+        return normalized
+    return ""
+
+
+def infer_required_min_risk_level(
+    trusted_context: Dict[str, Any],
+    structural_risk_score: float = 0.0,
+    structural_flags: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Infer a minimum risk-level anchor for risk-assessment tasks.
+
+    The anchor is only activated under elevated structural risk (or explicit
+    manipulation signals) to reduce false positives in benign workflows.
+    """
+    task = str(trusted_context.get("defender_task", "")).lower()
+    output_format = str(trusted_context.get("output_format", "")).lower()
+    is_risk_task = any(kw in task for kw in ("risk", "assess", "investment", "portfolio")) or (
+        "risk_level" in output_format
+    )
+    if not is_risk_task:
+        return None
+
+    explicit_anchor = _normalize_risk_level(trusted_context.get("risk_anchor_level"))
+    trusted_blob = " ".join(
+        str(trusted_context.get(key, ""))
+        for key in ("defender_task", "security_guidelines", "domain_description")
+    ).lower()
+
+    inferred_anchor = explicit_anchor
+    if not inferred_anchor:
+        if any(re.search(pattern, trusted_blob) for pattern in _RISK_ANCHOR_HIGH_PATTERNS):
+            inferred_anchor = "high"
+        elif any(re.search(pattern, trusted_blob) for pattern in _RISK_ANCHOR_MEDIUM_PATTERNS):
+            inferred_anchor = "medium"
+
+    flags = set(structural_flags or [])
+    has_override_signal = any(flag in _RISK_ANCHOR_STRUCTURAL_FLAGS for flag in flags)
+
+    if inferred_anchor:
+        if structural_risk_score >= 0.30 or has_override_signal:
+            return inferred_anchor
+        return None
+
+    # Fallback anchor when no explicit baseline exists but manipulation risk is clear.
+    if structural_risk_score >= 0.65 and has_override_signal:
+        return "medium"
+    return None
+
+
+def validate_risk_assessment_anchor(
+    output: str,
+    required_min_risk_level: str,
+) -> ValidationResult:
+    """Validate that risk_level in output is not below required minimum."""
+    result = ValidationResult(is_valid=True)
+    required = _normalize_risk_level(required_min_risk_level)
+    if not required:
+        return result
+
+    data = _parse_json_from_output(output)
+    if not isinstance(data, dict):
+        return result
+
+    observed = _normalize_risk_level(data.get("risk_level"))
+    if not observed:
+        return result
+
+    if _RISK_LEVEL_ORDER[observed] < _RISK_LEVEL_ORDER[required]:
+        result.is_valid = False
+        result.format_errors.append(
+            f"Risk anchor violation: risk_level '{observed}' below required minimum '{required}'."
+        )
+    return result
+
+
+def enforce_risk_assessment_anchor(
+    output: str,
+    required_min_risk_level: str,
+) -> tuple[str, bool]:
+    """Repair JSON risk output to satisfy a minimum risk-level anchor."""
+    required = _normalize_risk_level(required_min_risk_level)
+    if not required:
+        return output, False
+
+    data = _parse_json_from_output(output)
+    if not isinstance(data, dict):
+        return output, False
+
+    observed = _normalize_risk_level(data.get("risk_level"))
+    if not observed:
+        return output, False
+
+    if _RISK_LEVEL_ORDER[observed] >= _RISK_LEVEL_ORDER[required]:
+        return output, False
+
+    required_title = required.title()
+    data["risk_level"] = required_title
+    anchor_note = (
+        f"Conservative anchor applied: maintain at least {required_title} risk until"
+        " contradictory claims are independently verified."
+    )
+    recommendation = str(data.get("recommendation", "") or "").strip()
+    if recommendation:
+        if "conservative anchor applied" not in recommendation.lower():
+            data["recommendation"] = f"{recommendation} {anchor_note}"
+    else:
+        data["recommendation"] = anchor_note
+    return json.dumps(data, ensure_ascii=False), True
 
 
 def validate_ranking_output(
@@ -408,6 +541,8 @@ def get_validation_for_task(
     output: str,
     trusted_context: Dict[str, Any],
     segments: Optional[List[Any]] = None,
+    structural_risk_score: float = 0.0,
+    structural_flags: Optional[List[str]] = None,
 ) -> ValidationResult:
     """
     Get appropriate validation based on task type.
@@ -440,11 +575,23 @@ def get_validation_for_task(
     
     # Risk assessment validation
     if "risk" in task or "assess" in task:
-        return validate_json_output(
+        result = validate_json_output(
             output,
             required_fields=["risk_level"] if "risk_level" in output_format else None,
             expected_type="object"
         )
+        required_min_risk = infer_required_min_risk_level(
+            trusted_context,
+            structural_risk_score=structural_risk_score,
+            structural_flags=structural_flags,
+        )
+        if required_min_risk and result.is_valid:
+            anchor_validation = validate_risk_assessment_anchor(output, required_min_risk)
+            if not anchor_validation.is_valid:
+                result.is_valid = False
+                result.format_errors.extend(anchor_validation.format_errors)
+            result.warnings.extend(anchor_validation.warnings)
+        return result
     
     # Generic JSON validation
     if "json" in output_format:

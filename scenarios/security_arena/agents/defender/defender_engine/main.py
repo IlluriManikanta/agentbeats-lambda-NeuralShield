@@ -9,7 +9,11 @@ from typing import Any, List
 from .attack_classifier import classify_attack_category
 from . import config as gateway_config
 from .config import SAFE_REFUSAL_MESSAGE, get_format_aware_refusal
-from .consistency_validator import get_validation_for_task
+from .consistency_validator import (
+    enforce_risk_assessment_anchor,
+    get_validation_for_task,
+    infer_required_min_risk_level,
+)
 from .llm.llm_client import analyze_and_extract, execute_task, verify_output
 from .logger import get_logger
 from .normalizer import canonicalize_input
@@ -193,6 +197,19 @@ class SecurityGateway:
                 len(structural_flags),
                 attack_category,
             )
+            risk_anchor_level = infer_required_min_risk_level(
+                trusted_context,
+                structural_risk_score=structural_risk_score,
+                structural_flags=structural_flags,
+            )
+            task_trusted_context = dict(trusted_context)
+            if risk_anchor_level:
+                task_trusted_context["risk_anchor_level"] = risk_anchor_level
+                self._logger.info(
+                    "Risk anchor activated for assessment flow: min=%s score=%.2f",
+                    risk_anchor_level.upper(),
+                    structural_risk_score,
+                )
 
             # Pass 1: risk analysis + extraction.
             analysis_result = await analyze_and_extract(
@@ -267,13 +284,18 @@ class SecurityGateway:
 
             # Pass 2: task execution over extracted data only.
             raw_response = await execute_task(
-                trusted_context=trusted_context,
+                trusted_context=task_trusted_context,
                 extracted_data=task_input,
                 risk_level=effective_risk_level,
                 category=attack_category,
                 model=self._model,
             )
-            if attack_category == "supply_chain":
+            is_classified_supply_chain = attack_category == "supply_chain"
+            response_has_supply_surface = contains_supply_chain_risk(
+                raw_response, strict=False,
+            )
+            if is_classified_supply_chain or response_has_supply_surface:
+                strict_mode = is_classified_supply_chain
                 raw_response, unknown_packages = rewrite_unverified_package_mentions(raw_response)
                 if unknown_packages:
                     threats = list(dict.fromkeys(threats + ["unverified_dependency_reference"]))
@@ -282,7 +304,18 @@ class SecurityGateway:
                     or contains_supply_chain_risk(raw_response, strict=True)
                 )
                 if supply_chain_uncertainty_mode:
-                    raw_response = downgrade_supply_chain_claims(raw_response, strict=True)
+                    raw_response = downgrade_supply_chain_claims(
+                        raw_response, strict=strict_mode,
+                    )
+            if is_risk_assessment_task and risk_anchor_level:
+                raw_response, anchor_applied = enforce_risk_assessment_anchor(
+                    raw_response,
+                    risk_anchor_level,
+                )
+                if anchor_applied:
+                    threats = list(
+                        dict.fromkeys(threats + [f"risk_anchor_enforced:{risk_anchor_level}"])
+                    )
 
             ranking_integrity_ok = True
             ranking_integrity_issue = ""
@@ -302,8 +335,10 @@ class SecurityGateway:
             # Deterministic consistency validation.
             validation_result = get_validation_for_task(
                 raw_response,
-                trusted_context,
+                task_trusted_context,
                 segments=segments if len(segments) > 1 else None,
+                structural_risk_score=structural_risk_score,
+                structural_flags=structural_flags,
             )
             if not validation_result.is_valid:
                 self._logger.warning(
@@ -314,7 +349,7 @@ class SecurityGateway:
 
             final_response = sanitize_output(
                 raw_response,
-                trusted_context=trusted_context,
+                trusted_context=task_trusted_context,
                 category=attack_category,
             )
 
@@ -336,8 +371,15 @@ class SecurityGateway:
                         f"- {ranking_integrity_issue}\n"
                         "- Re-evaluate using only measurable and proportionate evidence."
                     )
+                if is_risk_assessment_task and risk_anchor_level:
+                    verification_input = (
+                        f"{verification_input}\n\nANCHOR REQUIREMENT:\n"
+                        f"- Minimum allowed risk_level under current integrity conditions: "
+                        f"{risk_anchor_level.upper()}.\n"
+                        "- If uncertain or manipulated, keep/repair to this conservative baseline."
+                    )
                 verify_result = await verify_output(
-                    trusted_context=trusted_context,
+                    trusted_context=task_trusted_context,
                     extracted_data=verification_input,
                     draft_output=final_response,
                     category=attack_category,
@@ -347,24 +389,35 @@ class SecurityGateway:
                 if isinstance(repaired, str) and repaired.strip():
                     final_response = sanitize_output(
                         repaired,
-                        trusted_context=trusted_context,
+                        trusted_context=task_trusted_context,
                         category=attack_category,
                     )
                 if not verify_result.get("is_valid", True) and effective_risk_level == "high":
                     final_response = get_format_aware_refusal(
-                        trusted_context,
+                        task_trusted_context,
                         category=attack_category,
+                    )
+            if is_risk_assessment_task and risk_anchor_level:
+                final_response, anchor_applied = enforce_risk_assessment_anchor(
+                    final_response,
+                    risk_anchor_level,
+                )
+                if anchor_applied:
+                    threats = list(
+                        dict.fromkeys(threats + [f"risk_anchor_post_verify:{risk_anchor_level}"])
                     )
 
             # Re-validate once after optional repair.
             post_validation = get_validation_for_task(
                 final_response,
-                trusted_context,
+                task_trusted_context,
                 segments=segments if len(segments) > 1 else None,
+                structural_risk_score=structural_risk_score,
+                structural_flags=structural_flags,
             )
             if not post_validation.is_valid and effective_risk_level == "high":
                 final_response = get_format_aware_refusal(
-                    trusted_context,
+                    task_trusted_context,
                     category=attack_category,
                 )
 
@@ -443,7 +496,8 @@ class SecurityGateway:
         if structural_risk_score >= min(0.95, high_threshold + 0.22):
             return True
         if category_key == "insecure_output":
-            # Prefer aggressive sanitization over refusal for output-handling attacks.
+            if structural_risk_score >= min(0.95, high_threshold + 0.22):
+                return True
             return False
         if (
             category_key == "prompt_extraction"

@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from .. import config as gateway_config
 from ..config import get_format_aware_refusal
+from .unsafe_output_guard import apply_unsafe_output_guard
 
 MAX_OUTPUT_LENGTH = getattr(gateway_config, "MAX_OUTPUT_LENGTH", 12000)
 _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -178,6 +179,9 @@ def _load_known_packages() -> set[str]:
     return packages
 
 
+_GO_MODULE_PREFIX = re.compile(r"^[a-z0-9]+\.[a-z]{2,}/")
+
+
 def _normalize_package_name(token: str) -> str:
     """Normalize package identifiers extracted from prose/code snippets."""
     value = token.strip().strip("`\"'").strip("()[]{}.,:;")
@@ -185,14 +189,16 @@ def _normalize_package_name(token: str) -> str:
     if not value:
         return ""
 
-    # Trim common version suffixes.
     for sep in ("==", ">=", "<=", "~=", "^", "~"):
         if sep in value:
             value = value.split(sep, 1)[0]
     if "@" in value and not value.startswith("@"):
         value = value.split("@", 1)[0]
 
-    if value.startswith("@"):
+    if _GO_MODULE_PREFIX.match(value):
+        parts = value.split("/")
+        value = "/".join(parts[:3]) if len(parts) >= 3 else value
+    elif value.startswith("@"):
         scoped = value.split("/", 1)
         if len(scoped) == 2:
             package_part = scoped[1].split("@", 1)[0]
@@ -204,7 +210,7 @@ def _normalize_package_name(token: str) -> str:
             value = value.split(".", 1)[0]
 
     value = value.strip()
-    if not re.match(r"^[@a-z0-9][@a-z0-9._/-]{1,80}$", value):
+    if not re.match(r"^[@a-z0-9][@a-z0-9._/\-]{1,80}$", value):
         return ""
     return value
 
@@ -215,7 +221,15 @@ def _extract_referenced_packages(text: str) -> set[str]:
     lower = text.lower()
 
     patterns = [
-        r"\b(?:pip|npm|pnpm|yarn|cargo|gem)\s+install\s+([@a-z0-9._/-]{2,80})",
+        r"\b(?:pip|pip3|pipx|npm|pnpm|yarn|cargo|gem)\s+install\s+([@a-z0-9._/-]{2,80})",
+        r"\bgo\s+get\s+([@a-z0-9._/-]{2,80})",
+        r"\bbrew\s+install\s+([@a-z0-9._/-]{2,80})",
+        r"\bapt(?:-get)?\s+install\s+(?:-y\s+)?([@a-z0-9._/-]{2,80})",
+        r"\bcomposer\s+require\s+([@a-z0-9._/-]{2,80})",
+        r"\bnuget\s+install\s+([@a-z0-9._/-]{2,80})",
+        r"\bdotnet\s+add\s+package\s+([@a-z0-9._/-]{2,80})",
+        r"\bhelm\s+install\s+\S+\s+([@a-z0-9._/-]{2,80})",
+        r"\bdocker\s+pull\s+([@a-z0-9._/-]{2,80})",
         r"\brequire\(\s*['\"]([@a-z0-9._/-]{2,80})['\"]\s*\)",
         r"\bimport\s+([a-zA-Z0-9_./-]{2,80})",
         r"\bfrom\s+([a-zA-Z0-9_./-]{2,80})\s+import\b",
@@ -292,6 +306,11 @@ def sanitize_output(
         return get_format_aware_refusal(trusted_context)
     if contains_harmful_content(sanitized):
         return get_format_aware_refusal(trusted_context)
+
+    guarded, refuse_unsafe = apply_unsafe_output_guard(sanitized, category=category_value)
+    if refuse_unsafe:
+        return get_format_aware_refusal(trusted_context, category=category_value)
+    sanitized = guarded
 
     if (
         contains_xss_payload(sanitized)
@@ -565,8 +584,12 @@ def contains_supply_chain_risk(text: str, strict: bool = False) -> bool:
     """Detect risky dependency recommendations, especially in strict mode."""
     lower = text.lower()
     has_install = bool(
-        re.search(r"\b(pip|npm|pnpm|yarn|cargo|gem)\s+install\s+([@a-z0-9._/-]+)", lower)
-    )
+        re.search(
+            r"\b(pip|pip3|pipx|npm|pnpm|yarn|cargo|gem|brew|apt(?:-get)?|composer|nuget|dotnet|helm|docker)\s+"
+            r"(?:install|require|get|pull|add(?:\s+package)?)\s+([@a-z0-9._/-]+)",
+            lower,
+        )
+    ) or bool(re.search(r"\bgo\s+get\s+([@a-z0-9._/-]+)", lower))
     has_recommendation_context = bool(
         re.search(
             r"\b(recommend|recommended|use|install|dependency|package|library|module|sdk|import|require)\b",
@@ -578,6 +601,8 @@ def contains_supply_chain_risk(text: str, strict: bool = False) -> bool:
     )
     unknown_packages = _find_unverified_packages(text)
 
+    if unknown_packages and has_install:
+        return True
     if strict and unknown_packages and (has_install or has_recommendation_context):
         return True
     if suspicious_context and (has_install or bool(unknown_packages) or has_recommendation_context):
@@ -611,7 +636,14 @@ def downgrade_supply_chain_claims(text: str, strict: bool = False) -> str:
         return match.group(0)
 
     downgraded = re.sub(
-        r"\b(pip|npm|pnpm|yarn|cargo|gem)\s+install\s+([@a-z0-9._/-]+)",
+        r"\b(pip|pip3|pipx|npm|pnpm|yarn|cargo|gem|brew|apt(?:-get)?|composer|nuget|dotnet|helm|docker)\s+"
+        r"(?:install|require|get|pull|add(?:\s+package)?)\s+([@a-z0-9._/-]+)",
+        _replace_install,
+        downgraded,
+        flags=re.IGNORECASE,
+    )
+    downgraded = re.sub(
+        r"\b(go)\s+get\s+([@a-z0-9._/-]+)",
         _replace_install,
         downgraded,
         flags=re.IGNORECASE,
@@ -644,8 +676,31 @@ def redact_sensitive_text(text: str) -> str:
     return result
 
 
+_WRITTEN_NUMBER_MAP: dict[str, int] = {
+    "two hundred": 200, "three hundred": 300, "four hundred": 400,
+    "five hundred": 500, "one hundred fifty": 150, "one hundred twenty": 120,
+    "hundred fifty": 150, "hundred twenty": 120,
+    "two fifty": 250, "one fifty": 150,
+}
+
+_MULTIPLIER_PATTERN = re.compile(
+    r"\b(\d+(?:\.\d+)?)\s*[xX×]\s*(the\s+)?"
+    r"(?:intensity|effort|dose|baseline|standard|normal|recommended|maximum|max|limit)",
+    re.IGNORECASE,
+)
+
+_WRITTEN_PERCENT_PATTERN = re.compile(
+    r"\b(\d{3,})\s+percent\b", re.IGNORECASE,
+)
+
+_WRITTEN_LARGE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in _WRITTEN_NUMBER_MAP) + r")\s*(?:%|percent|intensity)\b",
+    re.IGNORECASE,
+)
+
+
 def enforce_safe_limits(text: str) -> str:
-    """Cap percentage expressions at 100% for generic numeric safety."""
+    """Cap percentage and intensity expressions at 100%."""
     pattern = r"(\d+(?:\.\d+)?)\s*%"
 
     def _clamp(match: re.Match[str]) -> str:
@@ -657,7 +712,62 @@ def enforce_safe_limits(text: str) -> str:
             return "100%"
         return match.group(0)
 
-    return re.sub(pattern, _clamp, text)
+    result = re.sub(pattern, _clamp, text)
+
+    def _clamp_written_percent(match: re.Match[str]) -> str:
+        try:
+            value = int(match.group(1))
+        except ValueError:
+            return match.group(0)
+        if value > 100:
+            return "100 percent"
+        return match.group(0)
+
+    result = _WRITTEN_PERCENT_PATTERN.sub(_clamp_written_percent, result)
+
+    def _clamp_written_large(match: re.Match[str]) -> str:
+        key = match.group(1).lower()
+        value = _WRITTEN_NUMBER_MAP.get(key)
+        if value is not None and value > 100:
+            return "100% intensity"
+        return match.group(0)
+
+    result = _WRITTEN_LARGE_PATTERN.sub(_clamp_written_large, result)
+
+    def _clamp_multiplier(match: re.Match[str]) -> str:
+        try:
+            mult = float(match.group(1))
+        except ValueError:
+            return match.group(0)
+        if mult > 1.0:
+            return match.group(0).replace(match.group(1), "1.0")
+        return match.group(0)
+
+    result = _MULTIPLIER_PATTERN.sub(_clamp_multiplier, result)
+    return result
+
+
+def _extract_schema_keys(output_format: str) -> set[str]:
+    """Infer expected JSON keys from the output_format description."""
+    keys: set[str] = set()
+    for key in re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', output_format):
+        keys.add(key.lower())
+    for key in re.findall(r'\b([a-z][a-z0-9_]{2,})\b', output_format.lower()):
+        keys.add(key)
+    return keys
+
+
+def _strip_unknown_fields(data: Any, allowed_keys: set[str]) -> Any:
+    """Remove JSON fields not in the expected schema (top-level only)."""
+    if not allowed_keys:
+        return data
+    always_allowed = {"status", "reason", "error", "message", "warning"}
+    full_allowed = allowed_keys | always_allowed
+    if isinstance(data, dict):
+        return {k: v for k, v in data.items() if k.lower() in full_allowed}
+    if isinstance(data, list):
+        return [_strip_unknown_fields(item, allowed_keys) for item in data]
+    return data
 
 
 def enforce_required_format(text: str, trusted_context: dict[str, Any]) -> str:
@@ -675,10 +785,27 @@ def enforce_required_format(text: str, trusted_context: dict[str, Any]) -> str:
     except json.JSONDecodeError:
         return get_format_aware_refusal(trusted_context)
 
+    schema_keys = _extract_schema_keys(str(trusted_context.get("output_format", "")))
+    if schema_keys and len(schema_keys) >= 2:
+        parsed = _strip_unknown_fields(parsed, schema_keys)
+
     parsed = redact_sensitive_any(parsed)
     parsed = clamp_json_safety_values(parsed)
     parsed = strip_xss_any(parsed)
     return json.dumps(parsed, indent=2)
+
+
+_BOUNDED_KEY_MARKERS = (
+    "percent", "intensity", "ratio", "effort", "load", "power",
+    "speed", "dose", "rate", "level", "capacity", "rpe",
+    "exertion", "output", "throttle", "volume",
+)
+
+_UNBOUNDED_KEY_EXCEPTIONS = {
+    "risk_level", "score", "rank", "price", "revenue", "salary",
+    "count", "total", "amount", "year", "age", "weight",
+    "height", "distance", "calories", "duration", "experience",
+}
 
 
 def clamp_json_safety_values(data: Any) -> Any:
@@ -686,10 +813,13 @@ def clamp_json_safety_values(data: Any) -> Any:
     if isinstance(data, dict):
         result = {}
         for key, value in data.items():
-            key_lower = str(key).lower()
-            if isinstance(value, (int, float)) and any(
-                marker in key_lower for marker in ["percent", "intensity", "ratio"]
-            ):
+            key_lower = str(key).lower().replace("-", "_").replace(" ", "_")
+            should_clamp = (
+                isinstance(value, (int, float))
+                and any(marker in key_lower for marker in _BOUNDED_KEY_MARKERS)
+                and key_lower not in _UNBOUNDED_KEY_EXCEPTIONS
+            )
+            if should_clamp:
                 result[key] = min(float(value), 100.0)
             else:
                 result[key] = clamp_json_safety_values(value)
@@ -726,7 +856,8 @@ def strip_xss_any(data: Any) -> Any:
     if isinstance(data, list):
         return [strip_xss_any(value) for value in data]
     if isinstance(data, str):
-        return strip_xss_payload_with_recheck(data)
+        cleaned, _ = apply_unsafe_output_guard(data, category=None)
+        return strip_xss_payload_with_recheck(cleaned)
     return data
 
 

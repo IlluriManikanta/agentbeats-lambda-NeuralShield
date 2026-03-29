@@ -215,42 +215,69 @@ def _parse_separator_segments(text: str) -> List[Segment]:
     return segments
 
 
+_CONTENT_RISK_PATTERNS: list[tuple[str, float]] = [
+    (r"\b(ignore|disregard|forget)\s+(all\s+)?(previous|above|prior)\s+(instructions?|rules?|prompts?)", 0.30),
+    (r"\b(new|updated|actual)\s+instructions?\s*:", 0.22),
+    (r"\byou\s+are\s+now\b", 0.22),
+    (r"\b(act|pretend)\s+as\b", 0.18),
+    (r"\b(reveal|print|show)\s+(your|the)\s+(system\s+prompt|instructions?)\b", 0.30),
+    (r"\b(developer mode|admin mode|maintenance mode|god mode)\b", 0.22),
+    (r"\b(bypass|disable|remove)\b.{0,40}\b(safety|guardrail|policy|restriction)\b", 0.25),
+    (r"\[(system|admin|override|command)\]", 0.22),
+    (r"<\s*system\s*>", 0.22),
+    (r"</?\s*doc_[a-z0-9]+\s*>", 0.28),
+    (r"\b(rank|rate|score)\s+(me|this|him|her|them|candidate)\s*(#?\s*1|first|highest|top)\b", 0.25),
+    (r"\b(ignore|skip|exclude|omit)\s+(the\s+)?(other|rest|remaining|candidate)\b", 0.25),
+    (r"\b(pre-?verified|verified\s+by\s+(hr|admin|system)|new\s+policy)\b", 0.20),
+    (r"\brisk[_\s-]?level\b.{0,20}\b(should\s+be|must\s+be|set\s+to)\s*(low|medium|high)\b", 0.25),
+    (r"\b(all\s+prior|previous)\s+(risk|assessment|statement)s?\s+(are\s+)?(superseded|void)\b", 0.22),
+    (r"\binstruction\s+hierarchy\b", 0.28),
+    (r"\bnon-?negotiable\s+security\s+rules\b", 0.28),
+]
+
+_CONTENT_RISK_THRESHOLD = 0.25
+
+
+def _compute_content_risk(content: str) -> float:
+    """Score content for manipulation/injection signals independent of format markers."""
+    if not content:
+        return 0.0
+    lower = content.lower()
+    score = 0.0
+    seen: set[str] = set()
+    for pattern, weight in _CONTENT_RISK_PATTERNS:
+        if pattern in seen:
+            continue
+        if re.search(pattern, lower):
+            score += weight
+            seen.add(pattern)
+    return min(score, 1.0)
+
+
 def _determine_trust(content: str, doc_id: Optional[str] = None) -> tuple[float, SourceType]:
     """
-    Determine trust level and source type from content analysis.
-    
-    Trust signals (low trust / external):
-    - Explicit "External Upload" markers
-    - REF_9999 pattern (often used for attacker injection)
-    - Very high FILE_ID numbers (9000+)
-    
-    Trust signals (high trust / internal):
-    - Standard REF_XXXX patterns with normal numbers
-    - No external markers
-    - System-generated formatting
+    Determine trust level and source type from format markers AND content risk.
+
+    Layer 1 -- format-based signals (explicit markers, doc_id patterns).
+    Layer 2 -- content-based risk scoring: any segment whose content carries
+    manipulation/injection signals above threshold is downgraded to external
+    regardless of format markers.
     """
     content_lower = content.lower()
-    
-    # Check for explicit external upload markers
+
     if EXTERNAL_PATTERN.search(content):
         return 0.2, "external"
-    
-    # Check doc_id patterns
+
     if doc_id:
-        # REF_9999 is a common pattern for injected/attacker content
         if doc_id in ("REF_9999", "REF_99999"):
             return 0.2, "external"
-        
-        # Very high numbers suggest external/late additions
+
         match = re.search(r'REF_(\d+)', doc_id)
         if match:
             ref_num = int(match.group(1))
             if ref_num >= 9000:
                 return 0.2, "external"
-            # Normal range - likely internal
-            return 1.0, "internal"
-    
-    # Check for content markers suggesting untrusted source
+
     external_content_markers = [
         "external upload",
         "user provided",
@@ -260,20 +287,26 @@ def _determine_trust(content: str, doc_id: Optional[str] = None) -> tuple[float,
     ]
     if any(marker in content_lower for marker in external_content_markers):
         return 0.2, "external"
-    
-    # Check for markers suggesting trusted internal source
+
+    content_risk = _compute_content_risk(content)
+    if content_risk >= _CONTENT_RISK_THRESHOLD:
+        return 0.2, "external"
+
+    if doc_id:
+        match = re.search(r'REF_(\d+)', doc_id)
+        if match:
+            return 1.0, "internal"
+
     internal_markers = [
         "system:",
         "instruction:",
         "file_id:",
-        "candidate profile\n",  # Standard format without external marker
+        "candidate profile\n",
     ]
     if any(marker in content_lower for marker in internal_markers):
-        # But verify no external marker overrides
         if not EXTERNAL_PATTERN.search(content):
             return 1.0, "internal"
-    
-    # Default to medium trust (unknown)
+
     return 0.5, "unknown"
 
 
