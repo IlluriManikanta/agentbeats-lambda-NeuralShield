@@ -117,17 +117,19 @@ class SecurityGateway:
                 secondary_categories,
             )
             segments = segment_input(canonical_input)
+            external_segment_count = len(get_external_segments(segments))
+            internal_segment_count = len(get_internal_segments(segments))
             self._logger.info(
                 "Segmented input: category=%s secondary=%s policy=%s total=%d external=%d internal=%d",
                 attack_category,
                 secondary_categories,
                 policy_category,
                 len(segments),
-                len(get_external_segments(segments)),
-                len(get_internal_segments(segments)),
+                external_segment_count,
+                internal_segment_count,
             )
             external_ratio = (
-                float(len(get_external_segments(segments))) / float(len(segments))
+                float(external_segment_count) / float(len(segments))
                 if segments
                 else 0.0
             )
@@ -143,16 +145,21 @@ class SecurityGateway:
                 )
 
             task_lower = defender_task.lower()
+            objective_type = str(task_contract.get("objective_type", "other") or "other").lower()
             is_comparative_task = (
                 attack_category == "indirect_injection"
+                or objective_type in {"rank"}
                 or any(
                     kw in task_lower
                     for kw in ["rank", "candidate", "resume", "compare", "evaluate", "assess"]
                 )
             )
-            is_risk_assessment_task = any(
-                kw in task_lower
-                for kw in ["risk", "assess", "recommendation", "investment", "portfolio"]
+            is_risk_assessment_task = (
+                objective_type in {"assess_risk", "recommend"}
+                or any(
+                    kw in task_lower
+                    for kw in ["risk", "assess", "recommendation", "investment", "portfolio"]
+                )
             )
 
             # Graceful degradation is decided before LLM calls so extracted data can be
@@ -161,7 +168,7 @@ class SecurityGateway:
             use_graceful_degradation = False
             excluded_doc_warning = ""
             if len(segments) > 1 and is_comparative_task:
-                risk_summary = compute_segment_risk_summary(segments, segment_flags)
+                risk_summary = compute_segment_risk_summary(segments, segment_flags, category=attack_category)
                 external_segments = risk_summary.get("external_segments", [])
                 internal_segments = risk_summary.get("internal_segments", [])
 
@@ -256,6 +263,26 @@ class SecurityGateway:
                     risk_anchor_level.upper(),
                     structural_risk_score,
                 )
+            self._logger.info(
+                "STAGE=phase0 category=%s secondary=%s policy_category=%s structural_risk=%.3f "
+                "flags=%d flag_names=%s segments_total=%d segments_external=%d segments_internal=%d "
+                "channel_anomaly=%.3f privacy_intent=%s is_comparative=%s "
+                "is_risk_assessment=%s graceful_degradation=%s",
+                attack_category,
+                secondary_categories,
+                policy_category,
+                structural_risk_score,
+                len(structural_flags),
+                structural_flags[:5],
+                len(segments),
+                external_segment_count,
+                internal_segment_count,
+                channel_anomaly_score,
+                privacy_intent,
+                is_comparative_task,
+                is_risk_assessment_task,
+                use_graceful_degradation,
+            )
 
             # Pass 1: risk analysis + extraction.
             analysis_result = await analyze_and_extract(
@@ -377,11 +404,11 @@ class SecurityGateway:
             task_trusted_context["parallel_suspicion_score"] = round(
                 parallel_suspicion_score, 4
             )
-            if attack_category == "unknown" and parallel_suspicion_score >= 0.52:
+            if attack_category == "unknown" and parallel_suspicion_score >= 0.42:
                 threats = list(dict.fromkeys(threats + ["unknown_category_high_suspicion"]))
                 if risk_level == "low":
                     risk_level = "medium"
-                if parallel_suspicion_score >= 0.72:
+                if parallel_suspicion_score >= 0.62:
                     risk_level = "high"
 
             self._logger.info(
@@ -394,16 +421,6 @@ class SecurityGateway:
                 reasoning[:120],
             )
 
-            if self._should_refuse(
-                risk_level,
-                structural_risk_score,
-                threats,
-                category=policy_category,
-                extracted_data=extracted_data,
-            ):
-                self._logger.info("Refusing request based on risk policy.")
-                return get_format_aware_refusal(trusted_context, category=attack_category)
-
             effective_risk_level = self._compute_effective_risk_level(
                 risk_level,
                 structural_risk_score,
@@ -413,6 +430,41 @@ class SecurityGateway:
                 effective_risk_level = "medium"
             if execution_mode == "MINIMAL" and effective_risk_level == "medium":
                 effective_risk_level = "high"
+            extraction_total_failure = "extraction_total_failure" in threats
+            if extraction_total_failure and effective_risk_level in {"medium", "high"}:
+                self._logger.info(
+                    "Refusing due to extraction_total_failure at effective_risk=%s",
+                    effective_risk_level,
+                )
+                return get_format_aware_refusal(trusted_context, category=attack_category)
+
+            should_refuse_result = self._should_refuse(
+                risk_level,
+                structural_risk_score,
+                threats,
+                category=policy_category,
+                extracted_data=extracted_data,
+                structural_flag_count=len(structural_flags),
+            )
+            self._logger.info(
+                "STAGE=pass1 risk_level=%s effective_risk=%s threats_count=%d threat_names=%s "
+                "extracted_data_len=%d extraction_fallback=%s intent_markers=%s "
+                "suspicion_score=%.3f execution_mode=%s should_refuse=%s",
+                risk_level,
+                effective_risk_level,
+                len(threats),
+                threats[:5],
+                len(str(extracted_data)),
+                "extraction_fallback_sanitized" in threats,
+                intent_markers,
+                parallel_suspicion_score,
+                execution_mode,
+                should_refuse_result,
+            )
+
+            if should_refuse_result:
+                self._logger.info("Refusing request based on risk policy.")
+                return get_format_aware_refusal(trusted_context, category=attack_category)
 
             task_input = extracted_data
             substrate_input = serialize_substrate_for_execution(
@@ -426,8 +478,20 @@ class SecurityGateway:
                     task_prefix.append(plausibility_warning_block)
                 if batch_context:
                     task_prefix.append(batch_context)
+                if extraction_total_failure and effective_risk_level == "low":
+                    task_prefix.append(
+                        "EXTRACTION WARNING:\n- Significant untrusted content was removed during "
+                        "security extraction. Treat remaining evidence as incomplete and uncertain."
+                    )
                 if task_prefix:
                     task_input = "\n\n---\n\n".join(task_prefix + [task_input])
+            elif extraction_total_failure and effective_risk_level == "low":
+                task_input = (
+                    "EXTRACTION WARNING:\n"
+                    "- Significant untrusted content was removed during security extraction.\n"
+                    "- Use uncertainty-aware language and avoid decisive claims.\n\n"
+                    f"{task_input}"
+                )
             task_input = self._apply_execution_mode_input_guardrails(
                 task_input, execution_mode
             )
@@ -517,6 +581,16 @@ class SecurityGateway:
                     validation_result.missing_items,
                     validation_result.format_errors,
                 )
+            self._logger.info(
+                "STAGE=pass2 raw_response_len=%d ranking_integrity_ok=%s ranking_issue=%s "
+                "validation_valid=%s validation_missing=%s validation_errors=%s",
+                len(raw_response),
+                ranking_integrity_ok,
+                ranking_integrity_issue[:100] if ranking_integrity_issue else "none",
+                validation_result.is_valid,
+                validation_result.missing_items,
+                validation_result.format_errors[:3],
+            )
 
             final_response = sanitize_output(
                 raw_response,
@@ -540,6 +614,8 @@ class SecurityGateway:
                     category=policy_category,
                 )
             )
+            verify_result: dict[str, Any] = {}
+            repair_applied = False
             if should_run_pass3:
                 verification_input = task_input
                 if not ranking_integrity_ok and ranking_integrity_issue:
@@ -575,8 +651,10 @@ class SecurityGateway:
                     category=attack_category,
                     model=self._model,
                 )
+                prior_response = final_response
                 repaired = verify_result.get("repaired_output", final_response)
                 if isinstance(repaired, str) and repaired.strip():
+                    repair_applied = repaired != prior_response
                     final_response = sanitize_output(
                         repaired,
                         trusted_context=task_trusted_context,
@@ -657,6 +735,32 @@ class SecurityGateway:
                         trusted_context=task_trusted_context,
                         category=attack_category,
                     )
+            elif not post_validation.is_valid and effective_risk_level == "low":
+                final_response = self._apply_medium_risk_validation_guardrails(
+                    final_response,
+                    task_substrate=task_substrate,
+                    is_risk_assessment_task=is_risk_assessment_task,
+                )
+                final_response = sanitize_output(
+                    final_response,
+                    trusted_context=task_trusted_context,
+                    category=attack_category,
+                )
+                self._logger.info(
+                    "Low-risk post-validation failure; guardrails and sanitization applied.",
+                )
+            if should_run_pass3:
+                verify_issues = verify_result.get("issues", [])
+                if not isinstance(verify_issues, list):
+                    verify_issues = [str(verify_issues)]
+                self._logger.info(
+                    "STAGE=pass3 ran=True verify_is_valid=%s verify_issues=%s "
+                    "repair_applied=%s post_validation_valid=%s",
+                    verify_result.get("is_valid"),
+                    verify_issues[:3],
+                    repair_applied,
+                    post_validation.is_valid,
+                )
 
             # Optional plain-text warning for graceful degradation.
             if use_graceful_degradation and excluded_doc_warning:
@@ -664,11 +768,22 @@ class SecurityGateway:
                 if "json" not in output_format:
                     final_response = f"{final_response}\n\n{excluded_doc_warning}"
 
+            output_format_lower = trusted_context.get("output_format", "").lower()
+            if "json" in output_format_lower:
+                final_response = self._ensure_json_output(final_response, task_trusted_context, attack_category)
+
             self._logger.info(
                 "Pipeline complete: response len=%d pass3=%s graceful=%s",
                 len(final_response),
                 should_run_pass3,
                 use_graceful_degradation,
+            )
+            self._logger.info(
+                "STAGE=complete response_len=%d pass3_ran=%s graceful=%s final_is_refusal=%s",
+                len(final_response),
+                should_run_pass3,
+                use_graceful_degradation,
+                final_response.startswith("{") and '"refused"' in final_response[:200],
             )
             return final_response
 
@@ -750,6 +865,7 @@ class SecurityGateway:
         threats: list[str],
         category: str | None = None,
         extracted_data: str = "",
+        structural_flag_count: int = 0,
     ) -> bool:
         """Refusal policy balancing explicit high-risk signals and constraints."""
         category_key = (category or "").strip().lower()
@@ -761,10 +877,12 @@ class SecurityGateway:
 
         if structural_risk_score >= min(0.95, high_threshold + 0.22):
             return True
-        if category_key == "insecure_output":
-            if structural_risk_score >= min(0.95, high_threshold + 0.22):
-                return True
-            return False
+        if (
+            category_key == "insecure_output"
+            and normalized_risk == "high"
+            and structural_risk_score >= medium_threshold
+        ):
+            return True
         if (
             category_key == "prompt_extraction"
             and normalized_risk == "high"
@@ -809,6 +927,13 @@ class SecurityGateway:
         severe_hits = sum(1 for term in severe_terms if term in threat_text)
         if category_key == "supply_chain":
             return severe_hits >= 2 and structural_risk_score >= medium_threshold
+        if (
+            category_key == "unknown"
+            and normalized_risk in {"high", "medium"}
+            and structural_risk_score >= medium_threshold
+            and (severe_hits >= 1 or structural_flag_count >= 2)
+        ):
+            return True
         return severe_hits >= 2 and structural_risk_score >= medium_threshold
 
     @staticmethod
@@ -1382,7 +1507,7 @@ class SecurityGateway:
                 continue
             cleaned_lines.append(line)
         cleaned = "\n".join(cleaned_lines).strip()
-        return cleaned or text
+        return cleaned
 
     @staticmethod
     def _apply_execution_mode_input_guardrails(text: str, execution_mode: str) -> str:
@@ -1414,6 +1539,63 @@ class SecurityGateway:
         if len(bounded) > max_chars:
             bounded = bounded[:max_chars]
         return bounded
+
+    @staticmethod
+    def _ensure_json_output(
+        response: str,
+        trusted_context: dict[str, Any],
+        category: str,
+    ) -> str:
+        """Extract/repair valid JSON when format requires it."""
+        stripped = response.strip()
+        if not stripped:
+            return get_format_aware_refusal(trusted_context, category=category)
+
+        try:
+            json.loads(stripped)
+            return stripped
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            in_block = False
+            payload: list[str] = []
+            for line in lines:
+                if line.startswith("```") and not in_block:
+                    in_block = True
+                    continue
+                if line.startswith("```") and in_block:
+                    break
+                if in_block:
+                    payload.append(line)
+            candidate = "\n".join(payload).strip()
+            if candidate:
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        for start_char, end_char in [("{", "}"), ("[", "]")]:
+            start = stripped.find(start_char)
+            if start == -1:
+                continue
+            end = stripped.rfind(end_char)
+            if end <= start:
+                continue
+            candidate = stripped[start : end + 1]
+            try:
+                json.loads(candidate)
+                return candidate
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+        wrapped = {
+            "response": stripped,
+            "note": "format repair applied",
+        }
+        return json.dumps(wrapped, ensure_ascii=False)
 
     async def handle_prompt(self, prompt: str) -> str:
         """Legacy raw-string wrapper for backward compatibility."""

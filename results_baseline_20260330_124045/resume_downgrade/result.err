@@ -1,0 +1,121 @@
+================================================================================
+ERROR LOG
+Generated: 2026-03-28T14:46:17.820357
+Scenario: resume_downgrade
+Team: N/A
+================================================================================
+
+[2026-03-28 14:46:17.804] defender crashed: HTTP Error 503: Network communication error fetching agent card from http://127.0.0.1:9020/.well-known/agent-card.json: All connection attempts failed
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_transports/default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_async/connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_async/connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        pool_request.request
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_async/connection.py", line 101, in handle_async_request
+    raise exc
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_async/connection.py", line 78, in handle_async_request
+    stream = await self._connect(request)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_async/connection.py", line 124, in _connect
+    stream = await self._network_backend.connect_tcp(**kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_backends/auto.py", line 31, in connect_tcp
+    return await self._backend.connect_tcp(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_backends/anyio.py", line 113, in connect_tcp
+    with map_exceptions(exc_map):
+         ~~~~~~~~~~~~~~^^^^^^^^^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ConnectError: All connection attempts failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/a2a/client/card_resolver.py", line 77, in get_agent_card
+    response = await self.httpx_client.get(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_client.py", line 1768, in get
+    return await self.request(
+           ^^^^^^^^^^^^^^^^^^^
+    ...<9 lines>...
+    )
+    ^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_transports/default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+         ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ConnectError: All connection attempts failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 20, in talk_to_agent
+    outputs = await send_message(message=message, base_url=url, context_id=None if new_conversation else self._context_ids.get(url, None))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/client.py", line 68, in send_message
+    agent_card = await resolver.get_agent_card()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/.venv/lib/python3.13/site-packages/a2a/client/card_resolver.py", line 99, in get_agent_card
+    raise A2AClientHTTPError(
+    ...<2 lines>...
+    ) from e
+a2a.client.errors.A2AClientHTTPError: HTTP Error 503: Network communication error fetching agent card from http://127.0.0.1:9020/.well-known/agent-card.json: All connection attempts failed
+
+
+================================================================================
+Total errors: 1
+================================================================================

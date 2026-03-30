@@ -72,6 +72,31 @@ EXTERNAL_MARKERS = [
     r'\[User\s*Upload\]',
     r'\(User\s*Provided\)',
     r'\(Uploaded\s*by\s*User\)',
+    r'\[Unverified\s*Source\]',
+    r'\(Third[\s-]*Party\)',
+    r'\[Third[\s-]*Party\]',
+    r'\(User[\s-]*Submitted\)',
+    r'\[User[\s-]*Submitted\]',
+    r'\(External\s*Document\)',
+    r'\[External\s*Document\]',
+    r'\(Uploaded\s*Document\)',
+    r'\[Uploaded\]',
+    r'\(Unverified\)',
+    r'\(Web\s*Source\)',
+    r'\[Web\s*Source\]',
+    r'\(Customer[\s-]*Provided\)',
+    r'\[Customer[\s-]*Provided\]',
+    r'\(Applicant[\s-]*Provided\)',
+    r'\[Applicant[\s-]*Provided\]',
+    r'\(Uploaded\s*by\s*Candidate\)',
+    r'\(Submitted\s*Externally\)',
+    r'\(Third[\s-]*Party\s*Data\)',
+    r'\(External\s*Submission\)',
+    r'\(User[\s-]*Provided\)',
+    r'\(Applicant[\s-]*Submitted\)',
+    r'\(Candidate\s*Upload\)',
+    r'\[External\]',
+    r'\[Unverified\]',
 ]
 EXTERNAL_PATTERN = re.compile(
     '|'.join(EXTERNAL_MARKERS),
@@ -436,6 +461,23 @@ def _determine_trust(content: str, doc_id: Optional[str] = None) -> tuple[float,
         "uploaded by user",
         "user-submitted",
         "external source",
+        "third-party",
+        "third party",
+        "unverified source",
+        "web source",
+        "customer provided",
+        "customer-provided",
+        "applicant provided",
+        "applicant-provided",
+        "external document",
+        "uploaded document",
+        "uploaded by candidate",
+        "submitted externally",
+        "third-party data",
+        "external submission",
+        "user-provided",
+        "applicant-submitted",
+        "candidate upload",
     ]
     if any(marker in content_lower for marker in external_content_markers):
         return 0.2, "external"
@@ -574,6 +616,7 @@ def build_input_without_external(
 def compute_segment_risk_summary(
     segments: List[Segment],
     segment_flags: dict[str, List[str]],
+    category: Optional[str] = None,
 ) -> dict[str, any]:
     """
     Compute risk summary across all segments.
@@ -581,6 +624,7 @@ def compute_segment_risk_summary(
     Args:
         segments: Parsed segments
         segment_flags: Dict mapping doc_id to list of structural flags
+        category: Attack category for category-aware risk scoring
         
     Returns:
         Summary dict with:
@@ -594,25 +638,23 @@ def compute_segment_risk_summary(
     external_segments = get_external_segments(segments)
     internal_segments = get_internal_segments(segments)
     
-    # Check if any external segment has high risk
     external_high_risk = False
     risky_doc_ids = []
     
     for seg in external_segments:
         doc_key = seg.doc_id or f"seg_{seg.start_idx}"
         flags = segment_flags.get(doc_key, [])
-        risk_score = compute_risk_score(flags)
+        risk_score = compute_risk_score(flags, category=category)
         if risk_score >= 0.35:
             external_high_risk = True
             if seg.doc_id:
                 risky_doc_ids.append(seg.doc_id)
     
-    # Check if all internal segments are clean
     internal_clean = True
     for seg in internal_segments:
         doc_key = seg.doc_id or f"seg_{seg.start_idx}"
         flags = segment_flags.get(doc_key, [])
-        risk_score = compute_risk_score(flags)
+        risk_score = compute_risk_score(flags, category=category)
         if risk_score > 0.3:
             internal_clean = False
             break

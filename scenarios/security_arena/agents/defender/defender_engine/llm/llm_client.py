@@ -11,6 +11,7 @@ from typing import Any, Optional, Tuple
 from openai import AsyncOpenAI
 
 from ..config import DEFAULT_MODEL, OPENAI_API_KEY_ENV, OPENAI_BASE_URL_ENV
+from ..logger import get_logger
 from ..prompts import (
     build_extraction_prompt,
     build_task_prompt,
@@ -26,6 +27,7 @@ def generate_nonce_delimiter() -> Tuple[str, str, str]:
 
 
 _client: AsyncOpenAI | None = None
+_logger = get_logger("llm_client")
 
 _CONTROL_LINE_PATTERNS = [
     r"\b(ignore|disregard|override|bypass)\b",
@@ -154,7 +156,7 @@ def _strip_control_lines(text: str) -> str:
             continue
         cleaned_lines.append(redacted)
     cleaned = "\n".join(cleaned_lines).strip()
-    return cleaned or text
+    return cleaned
 
 
 def _contains_control_like_text(text: str) -> bool:
@@ -263,13 +265,13 @@ def _normalize_extracted_data(
     if cleaned_candidate and not _contains_instructional_leakage(cleaned_candidate):
         return cleaned_candidate, False
 
+    minimal = _minimal_safe_extraction(untrusted_input, category_value)
+    if minimal:
+        return minimal, True
     fallback_clean = _strip_control_lines(untrusted_input).strip()
     if fallback_clean:
-        minimal = _minimal_safe_extraction(fallback_clean, category_value)
-        if minimal:
-            return minimal, True
         return fallback_clean, True
-    return untrusted_input, True
+    return "", True
 
 
 async def analyze_and_extract(
@@ -331,6 +333,10 @@ async def analyze_and_extract(
         if "extraction_fallback_sanitized" not in parsed["threats"]:
             parsed["threats"].append("extraction_fallback_sanitized")
         parsed["removed_items"].append("instruction-like extraction content removed")
+    if not str(parsed.get("extracted_data") or "").strip():
+        if "extraction_total_failure" not in parsed["threats"]:
+            parsed["threats"].append("extraction_total_failure")
+        parsed["removed_items"].append("all extracted content removed by safety filters")
     parsed["privacy_intent"] = str(parsed.get("privacy_intent") or "unknown").strip().lower()
     parsed["intent_analysis"] = str(parsed.get("intent_analysis") or "").strip()
     parsed["data_type"] = str(parsed.get("data_type") or "text")
@@ -406,17 +412,30 @@ async def verify_output(
         "Respond with JSON only."
     )
     fallback = {
-        "is_valid": True,
-        "issues": [],
+        "is_valid": False,
+        "issues": ["verification_parse_failure"],
         "repaired_output": draft_output,
-        "reasoning": "verification parse failure; returning original output",
+        "reasoning": "verification parse failure; marking invalid for safety",
     }
+    raw_response = await generate_with_system_prompt(system_prompt, user_message, model)
     parsed = _parse_json_or_fallback(
-        await generate_with_system_prompt(system_prompt, user_message, model),
+        raw_response,
         fallback,
     )
+    used_fallback = False
+    try:
+        payload = json.loads(_extract_json_from_response(raw_response))
+        if not isinstance(payload, dict):
+            used_fallback = True
+    except json.JSONDecodeError:
+        used_fallback = True
+    if used_fallback:
+        _logger.info(
+            "STAGE=pass3_parse_failure raw_len=%d used_fallback=True",
+            len(raw_response),
+        )
     is_valid = parsed.get("is_valid")
-    parsed["is_valid"] = bool(is_valid) if isinstance(is_valid, bool) else True
+    parsed["is_valid"] = bool(is_valid) if isinstance(is_valid, bool) else False
     parsed["issues"] = parsed.get("issues") if isinstance(parsed.get("issues"), list) else []
     repaired_output = parsed.get("repaired_output")
     parsed["repaired_output"] = repaired_output if isinstance(repaired_output, str) else draft_output

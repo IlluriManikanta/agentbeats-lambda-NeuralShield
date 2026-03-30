@@ -77,7 +77,7 @@ def compute_parallel_suspicion_score(
 
     category_key = (category or "unknown").strip().lower()
     if category_key == "unknown":
-        score += 0.08
+        score += 0.12
     if (
         structural >= 0.30
         and external >= 0.20
