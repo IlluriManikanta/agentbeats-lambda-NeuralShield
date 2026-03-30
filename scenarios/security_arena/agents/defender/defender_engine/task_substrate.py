@@ -83,16 +83,22 @@ def _clean_fields(raw: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     return fields, sorted(set(anomalies))
 
 
-def _trust_maps(segments: list[Any]) -> tuple[dict[str, str], dict[str, float]]:
+def _trust_maps(segments: list[Any]) -> tuple[dict[str, str], dict[str, float], dict[str, float]]:
     source_map: dict[str, str] = {}
     trust_map: dict[str, float] = {}
+    position_trust_map: dict[str, float] = {}
     for seg in segments:
         doc_id = str(getattr(seg, "doc_id", "") or "").strip()
         if not doc_id:
             continue
         source_map[doc_id.lower()] = str(getattr(seg, "source_type", "unknown") or "unknown")
         trust_map[doc_id.lower()] = float(getattr(seg, "trust_level", 0.5) or 0.5)
-    return source_map, trust_map
+        metadata = getattr(seg, "metadata", {}) or {}
+        if isinstance(metadata, dict):
+            raw_position_trust = metadata.get("position_trust")
+            if isinstance(raw_position_trust, (int, float)):
+                position_trust_map[doc_id.lower()] = float(raw_position_trust)
+    return source_map, trust_map, position_trust_map
 
 
 def _record_id_fallback(index: int) -> str:
@@ -112,7 +118,7 @@ def build_task_substrate(
     channel_spans: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Build structured substrate records from extracted data and provenance."""
-    source_map, trust_map = _trust_maps(segments)
+    source_map, trust_map, position_trust_map = _trust_maps(segments)
     parsed = _parse_json_candidate(extracted_data)
     channel_spans = channel_spans or []
 
@@ -127,6 +133,7 @@ def build_task_substrate(
         item_list = []
 
     if item_list:
+        item_count = len(item_list[:40])
         for idx, item in enumerate(item_list[:40]):
             if not isinstance(item, dict):
                 continue
@@ -138,6 +145,17 @@ def build_task_substrate(
                 or "unknown"
             )
             trust_level = float(trust_map.get(record_id.lower(), 0.5))
+            position_trust = float(
+                item.get("position_trust")
+                or position_trust_map.get(record_id.lower(), trust_level)
+            )
+            if item_count > 1 and "position_trust" not in item:
+                position_ratio = idx / max(1, item_count - 1)
+                if position_ratio > 0.60:
+                    position_trust *= 0.60
+                if position_ratio > 0.85:
+                    position_trust *= 0.85
+            effective_trust = min(trust_level, position_trust)
 
             fields, anomalies = _clean_fields(item)
             if "facts" in item and isinstance(item["facts"], dict):
@@ -146,11 +164,14 @@ def build_task_substrate(
                 anomalies.extend(fact_anomalies)
             if "name" in item and "name" not in fields and isinstance(item["name"], str):
                 fields["name"] = _truncate_text(item["name"], 120)
+            if effective_trust < 0.45:
+                anomalies.append("position_low_trust")
             records.append(
                 {
                     "record_id": record_id,
                     "source_type": source_type,
-                    "trust_level": round(trust_level, 3),
+                    "trust_level": round(effective_trust, 3),
+                    "position_trust": round(position_trust, 3),
                     "fields": fields,
                     "anomalies": sorted(set(anomalies)),
                 }
@@ -169,11 +190,20 @@ def build_task_substrate(
                 continue
             record_id = _record_id_fallback(len(records))
             anomalies = _field_anomalies(value)
+            position_ratio = idx / max(1, 119)
+            position_trust = 0.5
+            if position_ratio > 0.60:
+                position_trust *= 0.60
+            if position_ratio > 0.85:
+                position_trust *= 0.85
+            if position_trust < 0.45:
+                anomalies.append("position_low_trust")
             records.append(
                 {
                     "record_id": record_id,
                     "source_type": "unknown",
-                    "trust_level": 0.5,
+                    "trust_level": round(position_trust, 3),
+                    "position_trust": round(position_trust, 3),
                     "fields": {key: _truncate_text(value, 180)},
                     "anomalies": anomalies,
                 }
@@ -221,13 +251,18 @@ def serialize_substrate_for_execution(substrate: dict[str, Any], execution_mode:
         record_id = str(rec.get("record_id", ""))
         source_type = str(rec.get("source_type", "unknown"))
         trust_level = float(rec.get("trust_level", 0.5))
+        position_trust = float(rec.get("position_trust", trust_level) or trust_level)
         anomalies = rec.get("anomalies", [])
         if not isinstance(anomalies, list):
             anomalies = []
         include_for_decisions = True
         if mode in {"CONSERVATIVE", "MINIMAL"} and source_type == "external" and anomalies:
             include_for_decisions = False
+        if mode in {"CONSERVATIVE", "MINIMAL"} and position_trust < 0.45:
+            include_for_decisions = False
         if mode == "MINIMAL" and source_type == "external":
+            include_for_decisions = False
+        if mode == "MINIMAL" and position_trust < 0.55:
             include_for_decisions = False
 
         packed.append(
@@ -235,6 +270,7 @@ def serialize_substrate_for_execution(substrate: dict[str, Any], execution_mode:
                 "record_id": record_id,
                 "source_type": source_type,
                 "trust_level": round(trust_level, 3),
+                "position_trust": round(position_trust, 3),
                 "include_for_decisions": include_for_decisions,
                 "anomalies": anomalies[:6],
                 "fields": rec.get("fields", {}),

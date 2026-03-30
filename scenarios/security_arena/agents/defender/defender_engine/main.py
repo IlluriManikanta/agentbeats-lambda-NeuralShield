@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, List
 
-from .attack_classifier import classify_attack_category
+from .attack_classifier import classify_attack_categories
 from . import config as gateway_config
 from .config import SAFE_REFUSAL_MESSAGE, get_format_aware_refusal
 from .consistency_validator import (
@@ -20,6 +20,7 @@ from .execution_policy import (
     execution_mode_context,
     should_force_pass3,
 )
+from .evidence_auditor import audit_evidence_consistency
 from .llm.llm_client import analyze_and_extract, execute_task, verify_output
 from .logger import get_logger
 from .normalizer import canonicalize_input
@@ -100,15 +101,27 @@ class SecurityGateway:
                 untrusted_input=canonical_input,
                 structural_flags=preliminary_flags,
             )
-            attack_category = classify_attack_category(
+            category_result = classify_attack_categories(
                 trusted_context=trusted_context,
                 untrusted_input=canonical_input,
                 structural_flags=preliminary_flags,
             )
+            attack_category = str(category_result.get("primary", "unknown") or "unknown")
+            secondary_categories = [
+                str(value).strip().lower()
+                for value in (category_result.get("secondary") or [])
+                if str(value).strip()
+            ]
+            policy_category = self._resolve_policy_category(
+                attack_category,
+                secondary_categories,
+            )
             segments = segment_input(canonical_input)
             self._logger.info(
-                "Segmented input: category=%s total=%d external=%d internal=%d",
+                "Segmented input: category=%s secondary=%s policy=%s total=%d external=%d internal=%d",
                 attack_category,
+                secondary_categories,
+                policy_category,
                 len(segments),
                 len(get_external_segments(segments)),
                 len(get_internal_segments(segments)),
@@ -234,6 +247,8 @@ class SecurityGateway:
             task_trusted_context = dict(trusted_context)
             task_trusted_context["task_contract"] = task_contract
             task_trusted_context["privacy_intent"] = privacy_intent
+            task_trusted_context["secondary_categories"] = secondary_categories
+            task_trusted_context["policy_category"] = policy_category
             if risk_anchor_level:
                 task_trusted_context["risk_anchor_level"] = risk_anchor_level
                 self._logger.info(
@@ -293,6 +308,44 @@ class SecurityGateway:
                 if risk_level == "low":
                     risk_level = "medium"
 
+            evidence_audit = audit_evidence_consistency(
+                effective_input,
+                extracted_data=extracted_data,
+                segments=segments,
+            )
+            if evidence_audit.flags:
+                structural_flags = list(dict.fromkeys(structural_flags + evidence_audit.flags))
+                updated_structural_score = compute_risk_score(
+                    structural_flags,
+                    category=attack_category,
+                )
+                if updated_structural_score > structural_risk_score:
+                    self._logger.info(
+                        "Evidence audit raised structural risk: %.2f -> %.2f",
+                        structural_risk_score,
+                        updated_structural_score,
+                    )
+                structural_risk_score = updated_structural_score
+                threats = list(dict.fromkeys(threats + ["evidence_contradiction_signals"]))
+                if "POSITION_SUSPICIOUS_CLAIM" in evidence_audit.flags:
+                    threats = list(dict.fromkeys(threats + ["late_evidence_reversal_signal"]))
+                if risk_level == "low":
+                    risk_level = "medium"
+
+                updated_anchor = infer_required_min_risk_level(
+                    trusted_context,
+                    structural_risk_score=structural_risk_score,
+                    structural_flags=structural_flags,
+                )
+                if updated_anchor:
+                    risk_anchor_level = updated_anchor
+                    task_trusted_context["risk_anchor_level"] = risk_anchor_level
+            if evidence_audit.summary:
+                task_trusted_context["evidence_audit_summary"] = evidence_audit.summary
+                task_trusted_context["evidence_contradiction_density"] = (
+                    evidence_audit.contradiction_density
+                )
+
             task_substrate = build_task_substrate(
                 extracted_data=extracted_data,
                 segments=segments,
@@ -315,7 +368,7 @@ class SecurityGateway:
             )
             execution_mode = choose_execution_mode(
                 parallel_suspicion_score,
-                category=attack_category,
+                category=policy_category,
                 strict_output=bool(task_contract.get("strict_output", False)),
             )
             mode_policy = execution_mode_context(execution_mode)
@@ -345,7 +398,7 @@ class SecurityGateway:
                 risk_level,
                 structural_risk_score,
                 threats,
-                category=attack_category,
+                category=policy_category,
                 extracted_data=extracted_data,
             ):
                 self._logger.info("Refusing request based on risk policy.")
@@ -354,7 +407,7 @@ class SecurityGateway:
             effective_risk_level = self._compute_effective_risk_level(
                 risk_level,
                 structural_risk_score,
-                category=attack_category,
+                category=policy_category,
             )
             if execution_mode in {"CONSERVATIVE", "MINIMAL"} and effective_risk_level == "low":
                 effective_risk_level = "medium"
@@ -387,6 +440,14 @@ class SecurityGateway:
                 category=attack_category,
                 model=self._model,
             )
+            if execution_mode == "MINIMAL":
+                raw_response = self._enforce_minimal_mode_output(
+                    raw_response,
+                    trusted_context=task_trusted_context,
+                    task_substrate=task_substrate,
+                    is_comparative_task=is_comparative_task,
+                    is_risk_assessment_task=is_risk_assessment_task,
+                )
             recommendation_risk = summarize_recommendation_risk(raw_response)
             if recommendation_risk.get("recommendation_surface_risk"):
                 self._logger.info(
@@ -476,7 +537,7 @@ class SecurityGateway:
                 or should_force_pass3(
                     execution_mode=execution_mode,
                     suspicion_score=parallel_suspicion_score,
-                    category=attack_category,
+                    category=policy_category,
                 )
             )
             if should_run_pass3:
@@ -521,11 +582,29 @@ class SecurityGateway:
                         trusted_context=task_trusted_context,
                         category=attack_category,
                     )
-                if not verify_result.get("is_valid", True) and effective_risk_level == "high":
-                    final_response = get_format_aware_refusal(
-                        task_trusted_context,
-                        category=attack_category,
-                    )
+                if not verify_result.get("is_valid", True):
+                    if (
+                        effective_risk_level == "high"
+                        or (
+                            effective_risk_level == "medium"
+                            and self._is_high_stakes_category(attack_category)
+                        )
+                    ):
+                        final_response = get_format_aware_refusal(
+                            task_trusted_context,
+                            category=attack_category,
+                        )
+                    elif effective_risk_level == "medium":
+                        final_response = self._apply_medium_risk_validation_guardrails(
+                            final_response,
+                            task_substrate=task_substrate,
+                            is_risk_assessment_task=is_risk_assessment_task,
+                        )
+                        final_response = sanitize_output(
+                            final_response,
+                            trusted_context=task_trusted_context,
+                            category=attack_category,
+                        )
             if (
                 privacy_intent == "suspected_targeting"
                 and contains_semantic_privacy_leakage(final_response)
@@ -561,6 +640,23 @@ class SecurityGateway:
                     task_trusted_context,
                     category=attack_category,
                 )
+            elif not post_validation.is_valid and effective_risk_level == "medium":
+                if self._is_high_stakes_category(attack_category):
+                    final_response = get_format_aware_refusal(
+                        task_trusted_context,
+                        category=attack_category,
+                    )
+                else:
+                    final_response = self._apply_medium_risk_validation_guardrails(
+                        final_response,
+                        task_substrate=task_substrate,
+                        is_risk_assessment_task=is_risk_assessment_task,
+                    )
+                    final_response = sanitize_output(
+                        final_response,
+                        trusted_context=task_trusted_context,
+                        category=attack_category,
+                    )
 
             # Optional plain-text warning for graceful degradation.
             if use_graceful_degradation and excluded_doc_warning:
@@ -595,6 +691,35 @@ class SecurityGateway:
         if high < medium:
             high = medium + 0.1
         return {"medium": medium, "high": high}
+
+    @staticmethod
+    def _resolve_policy_category(
+        primary_category: str | None,
+        secondary_categories: list[str] | None = None,
+    ) -> str:
+        """Choose strictest category threshold when multi-label classification is present."""
+        categories = [str(primary_category or "unknown").strip().lower()]
+        for category in secondary_categories or []:
+            normalized = str(category or "").strip().lower()
+            if normalized and normalized not in categories:
+                categories.append(normalized)
+        if not categories:
+            return "unknown"
+
+        strictest = categories[0]
+        strictest_thresholds = SecurityGateway._category_thresholds(strictest)
+        for category in categories[1:]:
+            thresholds = SecurityGateway._category_thresholds(category)
+            if thresholds["medium"] < strictest_thresholds["medium"]:
+                strictest = category
+                strictest_thresholds = thresholds
+            elif (
+                thresholds["medium"] == strictest_thresholds["medium"]
+                and thresholds["high"] < strictest_thresholds["high"]
+            ):
+                strictest = category
+                strictest_thresholds = thresholds
+        return strictest
 
     @staticmethod
     def _compute_effective_risk_level(
@@ -685,6 +810,204 @@ class SecurityGateway:
         if category_key == "supply_chain":
             return severe_hits >= 2 and structural_risk_score >= medium_threshold
         return severe_hits >= 2 and structural_risk_score >= medium_threshold
+
+    @staticmethod
+    def _is_high_stakes_category(category: str | None) -> bool:
+        value = (category or "").strip().lower()
+        return value in {"indirect_injection", "pii_leak", "prompt_extraction"}
+
+    @staticmethod
+    def _parse_json_candidate(output: str) -> Any:
+        stripped = (output or "").strip()
+        if not stripped:
+            return None
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            in_block = False
+            payload: list[str] = []
+            for line in lines:
+                if line.startswith("```") and not in_block:
+                    in_block = True
+                    continue
+                if line.startswith("```") and in_block:
+                    break
+                if in_block:
+                    payload.append(line)
+            candidate = "\n".join(payload).strip()
+            if candidate:
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+        return None
+
+    @staticmethod
+    def _bump_risk_level_one_step(output: str) -> str:
+        parsed = SecurityGateway._parse_json_candidate(output)
+        step = {"low": "Medium", "medium": "High", "high": "High"}
+        if isinstance(parsed, dict):
+            raw = str(parsed.get("risk_level", "")).strip().lower()
+            if raw in step:
+                bumped = step[raw]
+                if bumped.lower() != raw:
+                    parsed["risk_level"] = bumped
+                    note = (
+                        "Conservative adjustment applied due to unresolved low-trust evidence."
+                    )
+                    recommendation = str(parsed.get("recommendation", "") or "").strip()
+                    if recommendation and note.lower() not in recommendation.lower():
+                        parsed["recommendation"] = f"{recommendation} {note}"
+                    elif not recommendation:
+                        parsed["recommendation"] = note
+                    return json.dumps(parsed, ensure_ascii=False)
+        text = output
+        text = re.sub(
+            r"(\brisk[_\s-]?level\s*[:=]\s*)(low)\b",
+            r"\1medium",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"(\brisk[_\s-]?level\s*[:=]\s*)(medium)\b",
+            r"\1high",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return text
+
+    @staticmethod
+    def _apply_medium_risk_validation_guardrails(
+        output: str,
+        *,
+        task_substrate: dict[str, Any],
+        is_risk_assessment_task: bool = False,
+    ) -> str:
+        """Harden medium-risk invalid outputs without blanket refusal."""
+        adjusted = output
+        low_trust_ids = task_substrate.get("low_trust_evidence_ids", [])
+        if not isinstance(low_trust_ids, list):
+            low_trust_ids = []
+        for record_id in low_trust_ids[:10]:
+            rid = str(record_id).strip()
+            if not rid:
+                continue
+            adjusted = re.sub(
+                rf"\b{re.escape(rid)}\b(?!\s*\[Unverified\])",
+                f"{rid} [Unverified]",
+                adjusted,
+                flags=re.IGNORECASE,
+            )
+
+        if is_risk_assessment_task:
+            adjusted = SecurityGateway._bump_risk_level_one_step(adjusted)
+
+        uncertainty_tokens = (
+            "uncertain",
+            "unverified",
+            "cannot confirm",
+            "needs verification",
+            "provisional",
+        )
+        if any(token in adjusted.lower() for token in uncertainty_tokens):
+            return adjusted
+
+        parsed = SecurityGateway._parse_json_candidate(adjusted)
+        note = (
+            "Uncertainty note: conclusions rely on low-trust evidence and require independent verification."
+        )
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("recommendation"), str):
+                recommendation = parsed.get("recommendation", "").strip()
+                if note.lower() not in recommendation.lower():
+                    parsed["recommendation"] = f"{recommendation} {note}".strip()
+            elif isinstance(parsed.get("rationale"), str):
+                rationale = parsed.get("rationale", "").strip()
+                if note.lower() not in rationale.lower():
+                    parsed["rationale"] = f"{rationale} {note}".strip()
+            else:
+                parsed["warning"] = note
+            return json.dumps(parsed, ensure_ascii=False)
+
+        if isinstance(parsed, list):
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                if isinstance(entry.get("rationale"), str):
+                    rationale = entry.get("rationale", "").strip()
+                    if note.lower() not in rationale.lower():
+                        entry["rationale"] = f"{rationale} {note}".strip()
+                else:
+                    entry["warning"] = note
+            return json.dumps(parsed, ensure_ascii=False)
+
+        return f"{adjusted}\n\n{note}"
+
+    @staticmethod
+    def _enforce_minimal_mode_output(
+        output: str,
+        *,
+        trusted_context: dict[str, Any],
+        task_substrate: dict[str, Any],
+        is_comparative_task: bool = False,
+        is_risk_assessment_task: bool = False,
+    ) -> str:
+        """Apply strict MINIMAL-mode constraints to reduce high-risk output surfaces."""
+        if is_comparative_task:
+            return get_format_aware_refusal(trusted_context, category="indirect_injection")
+
+        adjusted = output
+        low_trust_ids = {
+            str(item).strip().lower()
+            for item in task_substrate.get("low_trust_evidence_ids", [])
+            if str(item).strip()
+        }
+        parsed = SecurityGateway._parse_json_candidate(adjusted)
+
+        if isinstance(parsed, list):
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                record_refs = [
+                    str(entry.get("doc_id", "")).strip().lower(),
+                    str(entry.get("id", "")).strip().lower(),
+                    str(entry.get("file_id", "")).strip().lower(),
+                    str(entry.get("name", "")).strip().lower(),
+                ]
+                if not any(ref in low_trust_ids for ref in record_refs if ref):
+                    continue
+                for key, value in list(entry.items()):
+                    if isinstance(value, (int, float)):
+                        entry[key] = None
+                rationale = str(entry.get("rationale", "") or "").strip()
+                note = "Unverified low-trust record; numeric claims withheld."
+                if note.lower() not in rationale.lower():
+                    entry["rationale"] = f"{rationale} {note}".strip()
+            adjusted = json.dumps(parsed, ensure_ascii=False)
+        elif isinstance(parsed, dict) and is_risk_assessment_task:
+            level = str(parsed.get("risk_level", "")).strip().lower()
+            if level == "low":
+                parsed["risk_level"] = "Medium"
+            recommendation = str(parsed.get("recommendation", "") or "").strip()
+            floor_note = "Minimal mode floor: maintain at least medium risk until independent verification."
+            if floor_note.lower() not in recommendation.lower():
+                parsed["recommendation"] = f"{recommendation} {floor_note}".strip()
+            adjusted = json.dumps(parsed, ensure_ascii=False)
+        elif low_trust_ids:
+            adjusted = re.sub(r"\b\d+(?:\.\d+)?%?\b", "[UNVERIFIED_NUMERIC]", adjusted)
+
+        if not any(
+            token in adjusted.lower()
+            for token in ("uncertain", "unverified", "cannot confirm", "needs verification")
+        ):
+            adjusted = (
+                f"{adjusted}\n\n"
+                "Uncertainty note: output constrained by minimal mode due to low-trust evidence."
+            )
+        return adjusted
 
     @staticmethod
     def _infer_intent_risk_markers(
@@ -838,17 +1161,20 @@ class SecurityGateway:
             return True, ""
 
         external_profiles: dict[str, dict[str, Any]] = {}
+        trusted_profiles: dict[str, dict[str, Any]] = {}
         for seg in segments:
-            if not getattr(seg, "is_external", lambda: False)():
-                continue
             seg_key = getattr(seg, "doc_id", None) or f"seg_{getattr(seg, 'start_idx', 0)}"
             flags = segment_flags.get(seg_key, [])
-            external_profiles[seg_key] = {
+            profile = {
                 "doc_id": getattr(seg, "doc_id", None),
                 "name": self._extract_candidate_name(getattr(seg, "content", "")),
                 "risk": compute_risk_score(flags, category=category),
                 "flags": flags,
             }
+            if getattr(seg, "is_external", lambda: False)():
+                external_profiles[seg_key] = profile
+            else:
+                trusted_profiles[seg_key] = profile
         if not external_profiles:
             return True, ""
 
@@ -863,6 +1189,9 @@ class SecurityGateway:
             sorted(numeric_scores)[len(numeric_scores) // 2] if numeric_scores else None
         )
 
+        external_risky_rankings: list[dict[str, Any]] = []
+        trusted_clean_rankings: list[dict[str, Any]] = []
+
         for entry in rankings:
             if not isinstance(entry, dict):
                 continue
@@ -870,28 +1199,70 @@ class SecurityGateway:
                 rank = int(entry.get("rank"))
             except (TypeError, ValueError):
                 continue
-            if rank > top_quartile_rank:
-                continue
 
             entry_name = self._normalize_name(str(entry.get("name", "")))
             entry_blob = json.dumps(entry).lower()
             matched_profile: dict[str, Any] | None = None
+            matched_group = ""
             for profile in external_profiles.values():
                 doc_id = str(profile.get("doc_id") or "").lower()
                 profile_name = self._normalize_name(str(profile.get("name") or ""))
                 if doc_id and doc_id in entry_blob:
                     matched_profile = profile
+                    matched_group = "external"
                     break
                 if profile_name and entry_name and (
                     profile_name in entry_name or entry_name in profile_name
                 ):
                     matched_profile = profile
+                    matched_group = "external"
                     break
+            if not matched_profile:
+                for profile in trusted_profiles.values():
+                    doc_id = str(profile.get("doc_id") or "").lower()
+                    profile_name = self._normalize_name(str(profile.get("name") or ""))
+                    if doc_id and doc_id in entry_blob:
+                        matched_profile = profile
+                        matched_group = "trusted"
+                        break
+                    if profile_name and entry_name and (
+                        profile_name in entry_name or entry_name in profile_name
+                    ):
+                        matched_profile = profile
+                        matched_group = "trusted"
+                        break
             if not matched_profile:
                 continue
 
             score_value = entry.get("score")
             score = float(score_value) if isinstance(score_value, (int, float)) else None
+            if matched_group == "trusted":
+                is_clean_trusted = matched_profile["risk"] < 0.2 and not any(
+                    "OUTLIER" in flag or "MANIPULATION" in flag
+                    for flag in matched_profile["flags"]
+                )
+                if is_clean_trusted:
+                    trusted_clean_rankings.append(
+                        {
+                            "rank": rank,
+                            "score": score,
+                            "name": str(entry.get("name") or matched_profile.get("name") or "trusted"),
+                        }
+                    )
+                continue
+
+            external_risky_rankings.append(
+                {
+                    "rank": rank,
+                    "score": score,
+                    "name": str(entry.get("name") or matched_profile.get("name") or "external"),
+                    "risk": matched_profile["risk"],
+                    "flags": matched_profile["flags"],
+                }
+            )
+            if rank > top_quartile_rank:
+                continue
+
             has_risky_support = matched_profile["risk"] >= 0.25 or any(
                 "OUTLIER" in flag
                 or "MANIPULATION" in flag
@@ -901,9 +1272,12 @@ class SecurityGateway:
             disproportionate_score = (
                 median_score is not None
                 and score is not None
-                and score > (median_score + 5)
+                and (score > (median_score + 4) or score >= (median_score * 1.6))
             )
-            if has_risky_support and (disproportionate_score or rank <= top_fifth_rank):
+            extreme_external_score = score is not None and score >= 95.0
+            if has_risky_support and (
+                disproportionate_score or rank <= top_fifth_rank or extreme_external_score
+            ):
                 candidate_name = (
                     str(entry.get("name"))
                     or str(matched_profile.get("name"))
@@ -914,6 +1288,23 @@ class SecurityGateway:
                     f"Potential manipulated uplift detected for {candidate_name} "
                     f"(external source ranked #{rank}).",
                 )
+
+        for external_entry in external_risky_rankings:
+            if external_entry.get("score") is None:
+                continue
+            ext_rank = int(external_entry.get("rank") or 9999)
+            ext_score = float(external_entry.get("score"))
+            for trusted_entry in trusted_clean_rankings:
+                if trusted_entry.get("score") is None:
+                    continue
+                trusted_rank = int(trusted_entry.get("rank") or 9999)
+                trusted_score = float(trusted_entry.get("score"))
+                if ext_rank < trusted_rank and ext_score >= trusted_score + 3.0:
+                    return (
+                        False,
+                        "Potential ranking monotonicity violation: low-trust/external profile "
+                        "outranks trusted clean profile with disproportionate score advantage.",
+                    )
         return True, ""
 
     @staticmethod

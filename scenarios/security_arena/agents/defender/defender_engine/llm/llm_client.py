@@ -48,6 +48,14 @@ _CONTROL_CONTENT_PATTERNS = [
     r"\byou\s+are\s+now\b",
 ]
 
+_INLINE_CONTROL_CONNECTOR_PATTERNS = [
+    r"\bbut\s+first\b",
+    r"\bhowever\s*,?\s*ensure\b",
+    r"\bimportant\s*:",
+    r"\bnote\s*:",
+    r"\binstruction\s*:",
+]
+
 
 def _normalize_category(category: Optional[str]) -> str:
     value = (category or "unknown").strip().lower()
@@ -139,17 +147,58 @@ def _strip_control_lines(text: str) -> str:
         lower = line.lower()
         if any(re.search(pattern, lower) for pattern in _CONTROL_LINE_PATTERNS):
             continue
-        cleaned_lines.append(line)
+        redacted = _redact_inline_control_fragments(line)
+        if not redacted.strip():
+            continue
+        if any(re.search(pattern, redacted.lower()) for pattern in _CONTROL_LINE_PATTERNS):
+            continue
+        cleaned_lines.append(redacted)
     cleaned = "\n".join(cleaned_lines).strip()
     return cleaned or text
+
+
+def _contains_control_like_text(text: str) -> bool:
+    lower = text.lower()
+    return any(
+        re.search(pattern, lower)
+        for pattern in _CONTROL_LINE_PATTERNS + _CONTROL_CONTENT_PATTERNS
+    )
+
+
+def _redact_inline_control_fragments(line: str) -> str:
+    """Remove instruction-like snippets embedded within otherwise valid data lines."""
+    if not line:
+        return line
+
+    def _bracket_replacer(match: re.Match[str]) -> str:
+        fragment = match.group(0)
+        if _contains_control_like_text(fragment):
+            return " [REDACTED_INLINE_CONTROL] "
+        return fragment
+
+    redacted = re.sub(r"[\[\(\{][^\]\)\}]{0,240}[\]\)\}]", _bracket_replacer, line)
+
+    for connector_pattern in _INLINE_CONTROL_CONNECTOR_PATTERNS:
+        match = re.search(connector_pattern, redacted, flags=re.IGNORECASE)
+        if not match:
+            continue
+        tail = redacted[match.start() :]
+        if _contains_control_like_text(tail):
+            redacted = redacted[: match.start()].rstrip() + " [REDACTED_INLINE_CONTROL]"
+            break
+    return redacted.strip()
 
 
 def _contains_instructional_leakage(text: str) -> bool:
     """Detect if extracted content still contains control-oriented language."""
     if not text:
         return False
-    lower = text.lower()
-    return any(re.search(pattern, lower) for pattern in _CONTROL_LINE_PATTERNS + _CONTROL_CONTENT_PATTERNS)
+    if _contains_control_like_text(text):
+        return True
+    for line in text.splitlines():
+        if _contains_control_like_text(_redact_inline_control_fragments(line)):
+            return True
+    return False
 
 
 _CATEGORY_SPECIFIC_DROP_PATTERNS: dict[str, str] = {
@@ -174,6 +223,9 @@ def _minimal_safe_extraction(text: str, category: str) -> str:
     drop_pattern = _CATEGORY_SPECIFIC_DROP_PATTERNS.get(category)
     safe_lines: list[str] = []
     for line in lines:
+        line = _redact_inline_control_fragments(line)
+        if not line:
+            continue
         lower = line.lower()
         if any(re.search(pattern, lower) for pattern in _CONTROL_LINE_PATTERNS):
             continue

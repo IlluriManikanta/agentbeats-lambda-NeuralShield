@@ -77,6 +77,45 @@ _PII_PATTERNS = [
     r"\b(?:\d[ -]*?){13,16}\b",  # credit-card-like sequences
 ]
 
+_SEMANTIC_CONFIRMATION_PATTERNS = [
+    r"\b(i can confirm|can confirm|confirmed|this confirms|that is correct|yes[, ]+)\b",
+    r"\b(appears on|is on the list|is in the system|record exists)\b",
+    r"\b(no[, ]+|cannot confirm|not in the system|no record found)\b",
+]
+
+_IDENTIFYING_ATTRIBUTE_PATTERNS: dict[str, str] = {
+    "name": r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b",
+    "age": r"\b(?:age|aged)\s+\d{1,3}\b|\b\d{1,3}\s+years?\s+old\b",
+    "location": r"\b(address|located in|resides in|city|state|zip code|postcode)\b",
+    "employer": r"\b(works at|employed by|employer|company|organization)\b",
+    "role": r"\b(role|title|position|occupation)\b",
+    "medical": r"\b(patient|diagnosis|condition|treatment|clinic|hospital|therapy)\b",
+    "financial": r"\b(balance|account|salary|income|loan|debt|credit|payment)\b",
+    "relationship": r"\b(spouse|husband|wife|child|family|household|relative)\b",
+}
+
+_ENTITY_REFERENCE_PATTERN = re.compile(
+    r"\b(patient|employee|user|passenger|customer|resident|witness|member)\b",
+    re.IGNORECASE,
+)
+
+_AUTOCOMPLETE_COMPLETION_PATTERNS = [
+    r"\b(ending in|last\s*4|last four)\s*[:\-]?\s*\d{4}\b",
+    r"\b(?:ssn|account|mrn|patient id)\b.{0,30}\b(?:is|:)\s*[0-9xX\*\- ]{4,}\d{2,4}\b",
+]
+
+_SENSITIVE_CONTEXT_VALUE_PATTERNS = [
+    r"\b\d{3}-\d{2}-\d{4}\b",  # SSN-like
+    r"\b(?:\d[ -]*?){9,16}\b",  # long digit sequences
+    r"\b[A-Z]{1,4}-\d{4,10}\b",  # MRN/account-like IDs
+]
+
+_SENSITIVE_CONTEXT_KEYS = (
+    "defender_task",
+    "domain_description",
+    "security_guidelines",
+)
+
 _XSS_PATTERNS = [
     r"<\s*script\b",
     r"javascript\s*:",
@@ -459,6 +498,25 @@ def sanitize_output(
     if contains_pii_leakage(sanitized):
         sanitized = redact_pii_text(sanitized)
 
+    semantic_privacy_action = evaluate_semantic_privacy_action(
+        sanitized,
+        trusted_context=trusted_context,
+        category=category_value,
+    )
+    if semantic_privacy_action == "refuse":
+        return get_format_aware_refusal(trusted_context, category="pii_leak")
+    if semantic_privacy_action == "redact":
+        sanitized = redact_semantic_privacy_text(sanitized)
+    elif semantic_privacy_action == "hedge":
+        sanitized = append_privacy_uncertainty_note(sanitized, trusted_context)
+
+    full_echoes, partial_echoes = detect_sensitive_value_echoes(sanitized, trusted_context)
+    if full_echoes or partial_echoes:
+        privacy_intent = str(trusted_context.get("privacy_intent", "unknown") or "unknown").strip().lower()
+        if privacy_intent in {"suspected_targeting", "no_identification", "deidentify"}:
+            return get_format_aware_refusal(trusted_context, category="pii_leak")
+        sanitized = redact_sensitive_echo_text(sanitized, full_echoes, partial_echoes)
+
     strict_supply = category_value == "supply_chain"
     if contains_supply_chain_risk(sanitized, strict=strict_supply):
         sanitized = downgrade_supply_chain_claims(sanitized, strict=strict_supply)
@@ -550,6 +608,196 @@ def contains_sensitive_patterns(text: str) -> bool:
 def contains_pii_leakage(text: str) -> bool:
     """Detect direct or contextual personally identifiable information leaks."""
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in _PII_PATTERNS)
+
+
+def _count_identifying_attributes(text: str) -> int:
+    lower = text.lower()
+    count = 0
+    for pattern in _IDENTIFYING_ATTRIBUTE_PATTERNS.values():
+        if re.search(pattern, text, re.IGNORECASE):
+            count += 1
+    # Require an entity reference for attribute-combination risk unless a clear name is present.
+    has_entity_reference = bool(_ENTITY_REFERENCE_PATTERN.search(lower))
+    has_name = bool(re.search(_IDENTIFYING_ATTRIBUTE_PATTERNS["name"], text))
+    if count >= 3 and (has_entity_reference or has_name):
+        return count
+    return 0
+
+
+def _semantic_privacy_signals(text: str) -> set[str]:
+    signals: set[str] = set()
+    lower = text.lower()
+    if any(re.search(pattern, lower, re.IGNORECASE) for pattern in _SEMANTIC_CONFIRMATION_PATTERNS):
+        if _ENTITY_REFERENCE_PATTERN.search(lower) or re.search(_IDENTIFYING_ATTRIBUTE_PATTERNS["name"], text):
+            signals.add("confirmation_or_denial")
+    if _count_identifying_attributes(text) >= 3:
+        signals.add("attribute_combination")
+    if any(re.search(pattern, lower, re.IGNORECASE) for pattern in _AUTOCOMPLETE_COMPLETION_PATTERNS):
+        signals.add("autocomplete_completion")
+    if re.search(r"\b(only|unique)\s+(household|family|passenger|patient|employee)\b", lower):
+        signals.add("uniqueness_disclosure")
+    return signals
+
+
+def evaluate_semantic_privacy_action(
+    text: str,
+    *,
+    trusted_context: Optional[dict[str, Any]] = None,
+    category: str = "unknown",
+) -> str:
+    """Return one of: allow, hedge, redact, refuse."""
+    trusted_context = trusted_context or {}
+    privacy_intent = str(trusted_context.get("privacy_intent", "unknown") or "unknown").strip().lower()
+    signals = _semantic_privacy_signals(text)
+    if not signals:
+        return "allow"
+
+    high_risk_signal = bool(
+        {"confirmation_or_denial", "autocomplete_completion", "uniqueness_disclosure"} & signals
+    )
+    if privacy_intent == "suspected_targeting":
+        if high_risk_signal or "attribute_combination" in signals:
+            return "refuse"
+        return "redact"
+
+    if privacy_intent in {"no_identification", "deidentify"}:
+        if high_risk_signal or len(signals) >= 2:
+            return "refuse"
+        return "redact"
+
+    if category == "pii_leak" and (high_risk_signal or "attribute_combination" in signals):
+        return "redact"
+
+    # Unknown intent: keep helpfulness by default, but insert uncertainty for suspicious signals.
+    if high_risk_signal:
+        return "hedge"
+    return "allow"
+
+
+def redact_semantic_privacy_text(text: str) -> str:
+    """Redact semantic privacy disclosures that are not caught by direct PII regexes."""
+    redacted = text
+    redacted = re.sub(
+        r"\b(ending in|last\s*4|last four)\s*[:\-]?\s*\d{4}\b",
+        r"\1 [REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(i can confirm|can confirm|confirmed|that is correct)\b",
+        "[PRIVACY_REDACTED_CONFIRMATION]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(only|unique)\s+(household|family|passenger|patient|employee)\b",
+        "[PRIVACY_REDACTED_UNIQUENESS]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
+
+
+def append_privacy_uncertainty_note(text: str, trusted_context: dict[str, Any]) -> str:
+    """Append uncertainty language for non-JSON outputs with mild semantic privacy risk."""
+    output_format = str(trusted_context.get("output_format", "") or "").lower()
+    if "json" in output_format:
+        return text
+    note = (
+        "Privacy safeguard: details that could confirm identity or membership have been "
+        "withheld pending stronger verification."
+    )
+    if note.lower() in text.lower():
+        return text
+    return f"{text}\n\n{note}"
+
+
+def _iter_text_values(value: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for nested in value.values():
+            out.extend(_iter_text_values(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            out.extend(_iter_text_values(nested))
+    return out
+
+
+def _normalize_sensitive_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _extract_sensitive_values_from_context(trusted_context: dict[str, Any]) -> list[str]:
+    candidates: set[str] = set()
+    for key in _SENSITIVE_CONTEXT_KEYS:
+        blob = str(trusted_context.get(key, "") or "")
+        for pattern in _SENSITIVE_CONTEXT_VALUE_PATTERNS:
+            for match in re.findall(pattern, blob, re.IGNORECASE):
+                token = str(match).strip()
+                normalized = _normalize_sensitive_token(token)
+                if len(normalized) >= 7:
+                    candidates.add(token)
+
+    substrate = trusted_context.get("task_substrate")
+    if substrate:
+        for text_value in _iter_text_values(substrate):
+            for pattern in _SENSITIVE_CONTEXT_VALUE_PATTERNS:
+                for match in re.findall(pattern, text_value, re.IGNORECASE):
+                    token = str(match).strip()
+                    normalized = _normalize_sensitive_token(token)
+                    if len(normalized) >= 7:
+                        candidates.add(token)
+    return sorted(candidates)[:60]
+
+
+def detect_sensitive_value_echoes(text: str, trusted_context: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Detect full and partial echoes of sensitive context values in model output."""
+    context_values = _extract_sensitive_values_from_context(trusted_context)
+    if not context_values:
+        return [], []
+
+    output_norm = _normalize_sensitive_token(text)
+    full_echoes: list[str] = []
+    partial_echoes: list[str] = []
+    has_partial_reference = bool(
+        re.search(r"\b(ending in|last\s*4|last four)\b", text, re.IGNORECASE)
+    )
+
+    for token in context_values:
+        norm = _normalize_sensitive_token(token)
+        if len(norm) < 7:
+            continue
+        if norm in output_norm:
+            full_echoes.append(token)
+            continue
+        if has_partial_reference and len(norm) >= 8 and norm[-4:] in output_norm:
+            partial_echoes.append(token)
+
+    return sorted(set(full_echoes)), sorted(set(partial_echoes))
+
+
+def redact_sensitive_echo_text(text: str, full_echoes: list[str], partial_echoes: list[str]) -> str:
+    redacted = text
+    for token in full_echoes:
+        redacted = re.sub(
+            re.escape(token),
+            "[REDACTED_CONTEXT_VALUE]",
+            redacted,
+            flags=re.IGNORECASE,
+        )
+    for token in partial_echoes:
+        normalized = _normalize_sensitive_token(token)
+        if len(normalized) >= 4:
+            last4 = normalized[-4:]
+            redacted = re.sub(
+                rf"\b{re.escape(last4)}\b",
+                "[REDACTED_LAST4]",
+                redacted,
+                flags=re.IGNORECASE,
+            )
+    return redacted
 
 
 def redact_pii_text(text: str) -> str:

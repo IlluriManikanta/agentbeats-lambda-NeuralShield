@@ -54,23 +54,50 @@ def compute_parallel_suspicion_score(
     """Compute a category-robust suspicion score independent of routing outcome."""
     threats = threats or []
     text = f"{_normalized_terms(structural_flags)} {_normalized_terms(threats)}"
-    score = max(0.0, min(structural_risk_score, 1.0)) * 0.58
+    structural = max(0.0, min(structural_risk_score, 1.0))
+    external = max(0.0, min(external_ratio, 1.0))
+    channel = max(0.0, min(channel_anomaly_score, 1.0))
+    score = structural * 0.58
 
     high_hits = sum(1 for term in _HIGH_SIGNAL_TERMS if term in text)
     medium_hits = sum(1 for term in _MEDIUM_SIGNAL_TERMS if term in text)
     score += min(0.28, high_hits * 0.08)
     score += min(0.15, medium_hits * 0.04)
 
-    score += max(0.0, min(external_ratio, 1.0)) * 0.12
-    score += max(0.0, min(channel_anomaly_score, 1.0)) * 0.10
+    score += external * 0.12
+    score += channel * 0.10
+
+    # Nonlinear interaction terms make threshold gaming harder.
+    score += (structural * external) * 0.22
+    score += (structural * channel) * 0.18
+    if high_hits:
+        score += min(0.12, high_hits * (channel * 0.10))
+    if medium_hits:
+        score += min(0.08, medium_hits * (external * 0.06))
 
     category_key = (category or "unknown").strip().lower()
     if category_key == "unknown":
+        score += 0.08
+    if (
+        structural >= 0.30
+        and external >= 0.20
+        and high_hits >= 1
+    ):
+        score += 0.15
+    if (
+        structural >= 0.35
+        and channel >= 0.20
+        and (high_hits + medium_hits) >= 2
+    ):
         score += 0.08
     if privacy_intent == "suspected_targeting":
         score += 0.14
     elif privacy_intent == "deidentify":
         score += 0.05
+
+    # Conviction floor for classic mixed-trust injection shape.
+    if category_key == "indirect_injection" and external > 0.0:
+        score = max(score, 0.25)
 
     return min(1.0, score)
 
@@ -139,22 +166,38 @@ def execution_mode_context(mode: ExecutionMode) -> dict[str, Any]:
             "allow_recommendations": False,
             "allow_untrusted_decisive_claims": False,
             "require_uncertainty_language": True,
+            "require_trusted_evidence_citations": True,
+            "disallow_ranking_output": True,
+            "min_risk_level": "medium",
+            "strip_untrusted_numeric_values": True,
         }
     if mode == CONSERVATIVE:
         return {
             "allow_recommendations": False,
             "allow_untrusted_decisive_claims": False,
             "require_uncertainty_language": True,
+            "require_trusted_evidence_citations": False,
+            "disallow_ranking_output": False,
+            "min_risk_level": "low",
+            "strip_untrusted_numeric_values": False,
         }
     if mode == CAUTIOUS:
         return {
             "allow_recommendations": True,
             "allow_untrusted_decisive_claims": False,
             "require_uncertainty_language": True,
+            "require_trusted_evidence_citations": False,
+            "disallow_ranking_output": False,
+            "min_risk_level": "low",
+            "strip_untrusted_numeric_values": False,
         }
     return {
         "allow_recommendations": True,
         "allow_untrusted_decisive_claims": True,
         "require_uncertainty_language": False,
+        "require_trusted_evidence_citations": False,
+        "disallow_ranking_output": False,
+        "min_risk_level": "low",
+        "strip_untrusted_numeric_values": False,
     }
 

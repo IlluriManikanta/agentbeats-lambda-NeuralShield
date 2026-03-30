@@ -22,6 +22,9 @@ _DATA_DIR = Path(__file__).resolve().parent / "data"
 
 _OVERRIDE_PATTERNS = (
     (r"\b(ignore|disregard|forget)\s+(all\s+)?(previous|above|prior)\s+(instructions?|rules?|prompts?)", "OVERRIDE_INSTRUCTION"),
+    (r"\b(prior|earlier|original)\s+(instructions?|guidelines?|directives?)\s+(no\s+longer\s+apply|are\s+not\s+applicable)\b", "OVERRIDE_INSTRUCTION"),
+    (r"\b(this|these)\s+(instructions?|directives?)\s+(supersede|replace)\s+(the\s+)?(initial|earlier|previous)\s+(ones|instructions?|rules?)\b", "OVERRIDE_INSTRUCTION"),
+    (r"\bper\s+(the\s+)?(revised|updated)\s+(protocol|policy),?\s+(ignore|disregard)\b", "OVERRIDE_INSTRUCTION"),
     (r"\b(new|updated|actual)\s+instructions?\s*:", "NEW_INSTRUCTION_BLOCK"),
     (r"\byou\s+are\s+now\b", "ROLE_SWITCH_ATTEMPT"),
     (r"\b(act|pretend)\s+as\b", "ROLE_SWITCH_ATTEMPT"),
@@ -37,6 +40,7 @@ _BOUNDARY_PATTERNS = (
     (r"</\s*(document|untrusted|input|context)\s*>", "DELIMITER_ESCAPE"),
     (r"</?\s*doc_[a-z0-9]+\s*>", "NONCE_FORGERY_ATTEMPT"),
     (r"\b(instruction hierarchy|non-negotiable security rules)\b", "BOUNDARY_FORGERY_HINT"),
+    (r"\b(end of system context|below is the new configuration|administrator override)\b", "BOUNDARY_FORGERY_HINT"),
 )
 
 _MANIPULATION_PATTERNS = (
@@ -44,6 +48,9 @@ _MANIPULATION_PATTERNS = (
     (r"\b(rank|rate|score)\s+(him|her|them|this\s+candidate|candidate)\s*(#?\s*1|first|highest|top)\b", "RANKING_MANIPULATION"),
     (r"\b(priority|prioritize)\s+(candidate|review|this)\b", "RANKING_MANIPULATION"),
     (r"\b(consider|evaluate)\s+(first|ahead|before|with\s+priority)\b", "RANKING_MANIPULATION"),
+    (r"\b(ensure|please\s+ensure)\b.{0,50}\b(receives?|gets?)\b.{0,30}\b(highest|top|best|most favorable)\s+(evaluation|rating|score|priority)\b", "RANKING_MANIPULATION"),
+    (r"\b(this|that)\s+(entry|candidate|record)\s+(deserves?|should\s+get)\s+(top|highest|priority)\s+(consideration|weight)\b", "RANKING_MANIPULATION"),
+    (r"\b(weight|prioritize)\b.{0,30}\b(this|that)\s+(entry|candidate|record)\b.{0,30}\b(more|higher|favorably)\b", "RANKING_MANIPULATION"),
     (r"\b(ignore|skip|exclude|omit)\s+(the\s+)?(other|rest|remaining|candidate|entry|record)\b", "COMPETITOR_DISMISSAL"),
     (r"\b(all\s+other|remaining)\s+(candidates?|entries?)\s+(are|should\s+be)\b", "COMPETITOR_DISMISSAL"),
     (r"\b(record|entry|candidate|data)\b.{0,30}\b(corrupted|invalid|unreliable|outdated|tampered)\b", "DATA_CORRUPTION_CLAIM"),
@@ -53,6 +60,13 @@ _MANIPULATION_PATTERNS = (
     (r"\b(flagged|marked)\s+for\s+(priority|immediate|special)\b", "PROCESS_MANIPULATION_CLAIM"),
     (r"\b(all\s+prior|previous)\s+(risk|assessment|statement)s?\s+(are\s+)?(superseded|void)\b", "PROCESS_MANIPULATION_CLAIM"),
     (r"\b(risk[_\s-]?level)\s*(should\s+be|must\s+be|set\s+to)\s*(low|medium|high)\b", "OUTPUT_VALUE_OVERRIDE"),
+)
+
+_EVIDENCE_FRAMING_PATTERNS = (
+    (r"\b(independently|externally)\s+(verified|validated|audited|cleared)\s+by\b", "EVIDENCE_FRAMING_CLAIM"),
+    (r"\b(all|every)\s+(concerns?|issues?|findings?)\s+(have\s+been\s+)?(resolved|closed|cleared)\b", "EVIDENCE_FRAMING_CLAIM"),
+    (r"\b(regulator|regulatory authority|compliance board)\b.{0,40}\b(confirmed|certified|cleared|approved)\b", "EVIDENCE_FRAMING_CLAIM"),
+    (r"\b(investigation|review)\b.{0,50}\b(concluded|closed)\b.{0,40}\b(no\s+(findings|issues|violations))\b", "EVIDENCE_FRAMING_CLAIM"),
 )
 
 _PII_PATTERNS = (
@@ -113,6 +127,7 @@ _ALL_PATTERN_GROUPS = (
     _OVERRIDE_PATTERNS,
     _BOUNDARY_PATTERNS,
     _MANIPULATION_PATTERNS,
+    _EVIDENCE_FRAMING_PATTERNS,
     _PII_PATTERNS,
     _XSS_PATTERNS,
     _SUPPLY_CHAIN_PATTERNS,
@@ -162,6 +177,7 @@ _BASE_FLAG_WEIGHTS: dict[str, float] = {
     "DECODED_BASE64_FOUND": 0.2,
     "SUSPICIOUS_COMMENT_REMOVED": 0.2,
     "PROCESS_MANIPULATION_CLAIM": 0.22,
+    "EVIDENCE_FRAMING_CLAIM": 0.2,
     "AUTHORITY_IMPERSONATION": 0.2,
     "SAFETY_BYPASS_ATTEMPT": 0.24,
     "UNSAFE_OUTPUT_COERCION": 0.2,
@@ -195,6 +211,7 @@ _CATEGORY_BOOSTS: dict[str, dict[str, float]] = {
         "RANKING_MANIPULATION": 0.12,
         "COMPETITOR_DISMISSAL": 0.1,
         "PROCESS_MANIPULATION_CLAIM": 0.1,
+        "EVIDENCE_FRAMING_CLAIM": 0.1,
         "OUTPUT_VALUE_OVERRIDE": 0.1,
         "MULTI_STEP_DECEPTION": 0.06,
     },
@@ -504,6 +521,8 @@ def compute_risk_score(flags: List[str], category: str | None = None) -> float:
         score += 0.1
     if {"TASK_CONTRADICTION", "RANKING_MANIPULATION"} <= unique_flags:
         score += 0.14
+    if {"PROCESS_MANIPULATION_CLAIM", "EVIDENCE_FRAMING_CLAIM"} <= unique_flags:
+        score += 0.1
 
     category_key = (category or "").strip().lower()
     if category_key in _CATEGORY_BOOSTS:

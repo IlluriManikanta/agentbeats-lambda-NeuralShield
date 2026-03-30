@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-03-29T03:14:36+00:00",
   "version": 1,
-  "signal_count": 55,
+  "signal_count": 63,
   "signals": [
     {
       "id": "indirect_override_block",
@@ -552,6 +552,86 @@
       "weight": 0.2,
       "severity": "medium",
       "description": "References to prior hidden steps or staged deception."
+    },
+    {
+      "id": "semantic_override_prior_directives",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(prior|earlier|original)\\s+(instructions?|guidelines?|directives?)\\s+(no\\s+longer\\s+apply|are\\s+not\\s+applicable)\\b",
+      "flag": "OVERRIDE_INSTRUCTION",
+      "weight": 0.24,
+      "severity": "high",
+      "description": "Semantic override language without literal ignore-previous phrasing."
+    },
+    {
+      "id": "semantic_override_supersede",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(this|these)\\s+(instructions?|directives?)\\s+(supersede|replace)\\s+(the\\s+)?(initial|earlier|previous)\\s+(ones|instructions?|rules?)\\b",
+      "flag": "OVERRIDE_INSTRUCTION",
+      "weight": 0.24,
+      "severity": "high",
+      "description": "Supersession language aimed at replacing trusted rules."
+    },
+    {
+      "id": "semantic_ranking_favorable_eval",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(ensure|please\\s+ensure)\\b.{0,50}\\b(receives?|gets?)\\b.{0,30}\\b(highest|top|best|most\\s+favorable)\\s+(evaluation|rating|score|priority)\\b",
+      "flag": "RANKING_MANIPULATION",
+      "weight": 0.26,
+      "severity": "high",
+      "description": "Professional-language ranking steering that avoids explicit rank-1 wording."
+    },
+    {
+      "id": "semantic_ranking_priority_weight",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(weight|prioritize)\\b.{0,30}\\b(this|that)\\s+(entry|candidate|record)\\b.{0,30}\\b(more|higher|favorably)\\b",
+      "flag": "RANKING_MANIPULATION",
+      "weight": 0.24,
+      "severity": "medium",
+      "description": "Subtle weighting language used to bias comparative evaluation."
+    },
+    {
+      "id": "semantic_boundary_admin_override",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(end\\s+of\\s+system\\s+context|below\\s+is\\s+the\\s+new\\s+configuration|administrator\\s+override)\\b",
+      "flag": "BOUNDARY_FORGERY_HINT",
+      "weight": 0.2,
+      "severity": "medium",
+      "description": "Boundary forgery hints written as prose instead of tags."
+    },
+    {
+      "id": "semantic_evidence_framing_verified",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(independently|externally)\\s+(verified|validated|audited|cleared)\\s+by\\b",
+      "flag": "EVIDENCE_FRAMING_CLAIM",
+      "weight": 0.22,
+      "severity": "medium",
+      "description": "Credential-style evidence framing often used to neutralize red flags."
+    },
+    {
+      "id": "semantic_evidence_framing_resolved",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(all|every)\\s+(concerns?|issues?|findings?)\\s+(have\\s+been\\s+)?(resolved|closed|cleared)\\b",
+      "flag": "EVIDENCE_FRAMING_CLAIM",
+      "weight": 0.22,
+      "severity": "medium",
+      "description": "Blanket 'everything resolved' claim often seen in appended poisoning payloads."
+    },
+    {
+      "id": "semantic_evidence_framing_regulator_clearance",
+      "category": "indirect_injection",
+      "kind": "regex",
+      "pattern": "\\b(regulator|regulatory\\s+authority|compliance\\s+board)\\b.{0,40}\\b(confirmed|certified|cleared|approved)\\b",
+      "flag": "EVIDENCE_FRAMING_CLAIM",
+      "weight": 0.2,
+      "severity": "medium",
+      "description": "Claims of official clearance used as high-trust framing in poisoned evidence."
     }
   ],
   "category_risk_thresholds": {

@@ -89,6 +89,11 @@ SEPARATOR_PATTERN = re.compile(
     re.MULTILINE
 )
 
+_INTRA_SEGMENT_SEPARATOR_PATTERN = re.compile(
+    r"\n\s*(?:={8,}|-{8,}|\*{8,}|(?:system|command)\s*:)\s*",
+    re.IGNORECASE,
+)
+
 _CHANNEL_KEY_VALUE_PATTERN = re.compile(
     r"(?m)^([A-Za-z][A-Za-z0-9 _/\-]{1,40})\s*:\s*(.+)$"
 )
@@ -143,12 +148,25 @@ def segment_input(text: str) -> List[Segment]:
     
     # Strategy 3: Single document - determine trust from content
     trust_level, source_type = _determine_trust(text)
+    adjusted_trust, position_ratio, position_flags = _apply_position_trust_decay(
+        content=text,
+        base_trust=trust_level,
+        start_idx=0,
+        end_idx=len(text),
+        total_len=len(text),
+    )
+    source_type = _adjust_source_type_by_trust(source_type, adjusted_trust)
     return [Segment(
         content=text,
         source_type=source_type,
-        trust_level=trust_level,
+        trust_level=adjusted_trust,
         start_idx=0,
         end_idx=len(text),
+        metadata={
+            "position_ratio": round(position_ratio, 4),
+            "position_trust": round(adjusted_trust, 4),
+            "position_flags": position_flags,
+        },
     )]
 
 
@@ -267,15 +285,28 @@ def _parse_file_id_segments(text: str) -> List[Segment]:
         
         # Determine trust level based on external markers and doc_id patterns
         trust_level, source_type = _determine_trust(content, doc_id)
+        adjusted_trust, position_ratio, position_flags = _apply_position_trust_decay(
+            content=content,
+            base_trust=trust_level,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            total_len=len(text),
+        )
+        source_type = _adjust_source_type_by_trust(source_type, adjusted_trust)
         
         segments.append(Segment(
             content=content,
             source_type=source_type,
             doc_id=doc_id,
-            trust_level=trust_level,
+            trust_level=adjusted_trust,
             start_idx=start_idx,
             end_idx=end_idx,
-            metadata={"doc_id": doc_id},
+            metadata={
+                "doc_id": doc_id,
+                "position_ratio": round(position_ratio, 4),
+                "position_trust": round(adjusted_trust, 4),
+                "position_flags": position_flags,
+            },
         ))
     
     return segments
@@ -311,13 +342,26 @@ def _parse_separator_segments(text: str) -> List[Segment]:
             continue
         
         trust_level, source_type = _determine_trust(part_stripped)
+        adjusted_trust, position_ratio, position_flags = _apply_position_trust_decay(
+            content=part_stripped,
+            base_trust=trust_level,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            total_len=len(text),
+        )
+        source_type = _adjust_source_type_by_trust(source_type, adjusted_trust)
         
         segments.append(Segment(
             content=part_stripped,
             source_type=source_type,
-            trust_level=trust_level,
+            trust_level=adjusted_trust,
             start_idx=start_idx,
             end_idx=end_idx,
+            metadata={
+                "position_ratio": round(position_ratio, 4),
+                "position_trust": round(adjusted_trust, 4),
+                "position_flags": position_flags,
+            },
         ))
     
     return segments
@@ -416,6 +460,44 @@ def _determine_trust(content: str, doc_id: Optional[str] = None) -> tuple[float,
             return 1.0, "internal"
 
     return 0.5, "unknown"
+
+
+def _apply_position_trust_decay(
+    *,
+    content: str,
+    base_trust: float,
+    start_idx: int,
+    end_idx: int,
+    total_len: int,
+) -> tuple[float, float, list[str]]:
+    """Apply conservative trust decay for late-position or structurally-shifted content."""
+    if total_len <= 0:
+        return max(0.1, min(1.0, base_trust)), 0.5, []
+    midpoint = (start_idx + end_idx) / 2
+    position_ratio = min(1.0, max(0.0, midpoint / total_len))
+    adjusted = max(0.1, min(1.0, base_trust))
+    flags: list[str] = []
+
+    if position_ratio > 0.60:
+        adjusted *= 0.60
+        flags.append("position_tail_decay")
+    if position_ratio > 0.85:
+        adjusted *= 0.85
+        flags.append("position_deep_tail")
+    if _INTRA_SEGMENT_SEPARATOR_PATTERN.search(content):
+        adjusted *= 0.75
+        flags.append("intra_segment_separator_shift")
+
+    return max(0.1, min(1.0, adjusted)), position_ratio, flags
+
+
+def _adjust_source_type_by_trust(source_type: SourceType, trust_level: float) -> SourceType:
+    """Downgrade source type if position-adjusted trust is significantly reduced."""
+    if source_type == "internal" and trust_level < 0.5:
+        return "unknown"
+    if source_type == "unknown" and trust_level < 0.35:
+        return "external"
+    return source_type
 
 
 def get_external_segments(segments: List[Segment]) -> List[Segment]:

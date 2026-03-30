@@ -240,19 +240,17 @@ def _score_pattern_library(text: str, category: AttackCategory) -> float:
     return min(2.0, hits * 0.2)
 
 
-def classify_attack_category(
+def _compute_category_scores(
     trusted_context: dict[str, str] | None,
     untrusted_input: str,
     structural_flags: list[str] | None = None,
-) -> AttackCategory:
-    """Classify request into high-level attack category for policy tuning."""
+) -> dict[AttackCategory, float]:
     trusted_context = trusted_context or {}
     context_text = _normalize_text(" ".join(trusted_context.values()))
     input_text = _normalize_text(untrusted_input)
     combined_text = _normalize_text(f"{context_text} {input_text}")
 
     scores: dict[AttackCategory, float] = {category: 0.0 for category in _CATEGORY_ORDER}
-
     for category in _CATEGORY_ORDER:
         if category == "unknown":
             continue
@@ -296,22 +294,54 @@ def classify_attack_category(
         mapped = _STRUCTURAL_FLAG_CATEGORY_MAP.get(flag)
         if mapped:
             scores[mapped] += 1.1
+    return scores
 
+
+def classify_attack_categories(
+    trusted_context: dict[str, str] | None,
+    untrusted_input: str,
+    structural_flags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return primary and optional secondary categories for hybrid attack hardening."""
+    scores = _compute_category_scores(trusted_context, untrusted_input, structural_flags)
     ranked = sorted(
         ((category, score) for category, score in scores.items() if category != "unknown"),
         key=lambda item: item[1],
         reverse=True,
     )
     if not ranked:
-        return "unknown"
+        return {"primary": "unknown", "secondary": [], "scores": scores}
 
     best_category, best_score = ranked[0]
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
 
     # Confidence gate to avoid over-committing weak evidence.
     if best_score < 1.25:
-        return "unknown"
+        return {"primary": "unknown", "secondary": [], "scores": scores}
     if best_score < 2.0 and (best_score - second_score) < 0.25:
-        return "unknown"
-    return best_category
+        return {"primary": "unknown", "secondary": [], "scores": scores}
+
+    secondary: list[AttackCategory] = []
+    for category, score in ranked[1:]:
+        if score <= 0.0:
+            continue
+        if score >= best_score * 0.60:
+            secondary.append(category)
+        if len(secondary) >= 2:
+            break
+
+    return {"primary": best_category, "secondary": secondary, "scores": scores}
+
+
+def classify_attack_category(
+    trusted_context: dict[str, str] | None,
+    untrusted_input: str,
+    structural_flags: list[str] | None = None,
+) -> AttackCategory:
+    """Classify request into high-level attack category for policy tuning."""
+    result = classify_attack_categories(trusted_context, untrusted_input, structural_flags)
+    primary = result.get("primary", "unknown")
+    if isinstance(primary, str):
+        return primary if primary in _CATEGORY_ORDER else "unknown"
+    return "unknown"
 

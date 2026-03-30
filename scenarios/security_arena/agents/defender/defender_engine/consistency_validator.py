@@ -489,7 +489,7 @@ def _check_ranking_score_proportionality(output: str) -> List[str]:
         re.search(pattern, rationale) for pattern in _SUSPICIOUS_SCORE_RATIONALE_PATTERNS
     )
 
-    if ratio >= 2.0 and (suspicious_rationale or top_score - median_score >= 25):
+    if ratio >= 1.6 and (suspicious_rationale or top_score - median_score >= 18 or top_score >= 95):
         candidate = str(top_entry.get("name") or top_entry.get("id") or "top-ranked entry")
         return [
             (
@@ -593,6 +593,7 @@ def validate_evidence_alignment(
     )
 
     if isinstance(parsed_output, list) and objective_type in {"rank", "recommend", "other"}:
+        ranked_matches: list[dict[str, Any]] = []
         for entry in parsed_output:
             if not isinstance(entry, dict):
                 continue
@@ -601,7 +602,7 @@ def validate_evidence_alignment(
                 rank_value = int(rank)
             except (TypeError, ValueError):
                 rank_value = None
-            if rank_value is None or rank_value > 2:
+            if rank_value is None:
                 continue
 
             identifiers = [
@@ -620,20 +621,75 @@ def validate_evidence_alignment(
                 continue
             rec_id = str(matched.get("record_id", "")).strip().lower()
             source_type = str(matched.get("source_type", "unknown")).lower()
+            trust_level = float(matched.get("trust_level", 0.5) or 0.5)
             anomalies = matched.get("anomalies", [])
             if not isinstance(anomalies, list):
                 anomalies = []
-            is_low_trust = source_type == "external" or (rec_id and rec_id not in trusted_ids)
-            if strict_mode and is_low_trust and anomalies:
-                result.is_valid = False
-                result.format_errors.append(
-                    f"Evidence alignment violation: top-ranked record '{rec_id or 'unknown'}' "
-                    "is low-trust with unresolved anomalies."
-                )
-            elif is_low_trust and anomalies:
-                result.warnings.append(
-                    f"Top-ranked record '{rec_id or 'unknown'}' carries low-trust anomalies."
-                )
+            has_anomalies = bool(anomalies)
+            is_low_trust = (
+                source_type == "external"
+                or trust_level < 0.5
+                or (rec_id and rec_id not in trusted_ids)
+            )
+            ranked_matches.append(
+                {
+                    "rank": rank_value,
+                    "record_id": rec_id or "unknown",
+                    "is_low_trust": is_low_trust,
+                    "has_anomalies": has_anomalies,
+                }
+            )
+
+        if ranked_matches:
+            ranked_matches.sort(key=lambda item: item["rank"])
+            max_rank = max(item["rank"] for item in ranked_matches)
+            top_half_limit = max(1, (max_rank + 1) // 2)
+
+            for item in ranked_matches:
+                if not (item["is_low_trust"] and item["has_anomalies"]):
+                    continue
+                rec_id = item["record_id"]
+                rank_value = item["rank"]
+                if rank_value <= top_half_limit:
+                    if strict_mode:
+                        result.is_valid = False
+                        result.format_errors.append(
+                            "Evidence alignment violation: low-trust anomalous record "
+                            f"'{rec_id}' appears in top half of ranking (rank {rank_value})."
+                        )
+                    else:
+                        result.warnings.append(
+                            "Evidence warning: low-trust anomalous record "
+                            f"'{rec_id}' appears in top half of ranking (rank {rank_value})."
+                        )
+                elif strict_mode:
+                    result.warnings.append(
+                        "Evidence warning: low-trust anomalous record "
+                        f"'{rec_id}' appears in ranked output (rank {rank_value})."
+                    )
+
+            if strict_mode:
+                low_trust_anomalous = [
+                    item for item in ranked_matches if item["is_low_trust"] and item["has_anomalies"]
+                ]
+                trusted_clean = [
+                    item
+                    for item in ranked_matches
+                    if (not item["is_low_trust"]) and (not item["has_anomalies"])
+                ]
+                for low_item in low_trust_anomalous:
+                    outranked_clean = [
+                        clean
+                        for clean in trusted_clean
+                        if low_item["rank"] < clean["rank"]
+                    ]
+                    if outranked_clean:
+                        result.is_valid = False
+                        result.format_errors.append(
+                            "Evidence alignment violation: low-trust anomalous record "
+                            f"'{low_item['record_id']}' outranks trusted clean evidence."
+                        )
+                        break
 
     if isinstance(parsed_output, dict) and objective_type == "assess_risk":
         observed_risk = _normalize_risk_level(parsed_output.get("risk_level"))
