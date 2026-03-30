@@ -55,6 +55,29 @@ CATEGORY_RISK_THRESHOLDS: Final[dict[str, dict[str, float]]] = {
     "unknown": {"medium": 0.55, "high": 0.78},
 }
 
+EXECUTION_MODE_THRESHOLDS: Final[dict[str, dict[str, float]]] = {
+    "default": {
+        "cautious": 0.34,
+        "conservative": 0.58,
+        "minimal": 0.78,
+    },
+    "unknown": {
+        "cautious": 0.30,
+        "conservative": 0.54,
+        "minimal": 0.76,
+    },
+    "pii_leak": {
+        "cautious": 0.30,
+        "conservative": 0.52,
+        "minimal": 0.74,
+    },
+    "indirect_injection": {
+        "cautious": 0.32,
+        "conservative": 0.56,
+        "minimal": 0.76,
+    },
+}
+
 
 def _normalize_category(category: str | None) -> str:
     value = (category or "unknown").strip().lower()

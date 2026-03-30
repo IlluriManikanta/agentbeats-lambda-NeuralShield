@@ -254,6 +254,7 @@ async def analyze_and_extract(
         "risk_level": "medium",
         "threats": ["analysis_parse_failure"],
         "extracted_data": fallback_extracted,
+        "privacy_intent": "unknown",
         "intent_analysis": "",
         "data_type": "text",
         "removed_items": [],
@@ -278,6 +279,7 @@ async def analyze_and_extract(
         if "extraction_fallback_sanitized" not in parsed["threats"]:
             parsed["threats"].append("extraction_fallback_sanitized")
         parsed["removed_items"].append("instruction-like extraction content removed")
+    parsed["privacy_intent"] = str(parsed.get("privacy_intent") or "unknown").strip().lower()
     parsed["intent_analysis"] = str(parsed.get("intent_analysis") or "").strip()
     parsed["data_type"] = str(parsed.get("data_type") or "text")
     parsed["reasoning"] = str(parsed.get("reasoning") or "analysis completed")

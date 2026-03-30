@@ -14,6 +14,12 @@ from .consistency_validator import (
     get_validation_for_task,
     infer_required_min_risk_level,
 )
+from .execution_policy import (
+    choose_execution_mode,
+    compute_parallel_suspicion_score,
+    execution_mode_context,
+    should_force_pass3,
+)
 from .llm.llm_client import analyze_and_extract, execute_task, verify_output
 from .logger import get_logger
 from .normalizer import canonicalize_input
@@ -23,21 +29,27 @@ from .plausibility_analyzer import (
     get_batch_z_score_summary,
     normalize_outlier_claims,
 )
+from .privacy_router import contains_semantic_privacy_leakage, infer_privacy_intent
 from .sanitizer.output_sanitizer import (
     contains_pii_leakage,
     contains_supply_chain_risk,
     downgrade_supply_chain_claims,
     rewrite_unverified_package_mentions,
     sanitize_output,
+    summarize_recommendation_risk,
 )
 from .segmenter import (
     build_input_without_external,
+    compute_channel_anomaly_score,
     compute_segment_risk_summary,
+    extract_channel_spans,
     get_external_segments,
     get_internal_segments,
     segment_input,
 )
 from .structural_analyzer import analyze_structure, compute_risk_score
+from .task_contract import compile_task_contract
+from .task_substrate import build_task_substrate, serialize_substrate_for_execution
 
 MAX_INPUT_LENGTH = getattr(gateway_config, "MAX_INPUT_LENGTH", 40000)
 
@@ -55,6 +67,7 @@ class SecurityGateway:
             trusted_context = request.get("trusted_context", {}) or {}
             untrusted_input = request.get("untrusted_input", "") or ""
             defender_task = trusted_context.get("defender_task", "")
+            task_contract = compile_task_contract(trusted_context)
 
             if len(untrusted_input) > MAX_INPUT_LENGTH:
                 self._logger.info(
@@ -72,9 +85,20 @@ class SecurityGateway:
 
             # Phase 0: canonicalization + preliminary structural scan + classification + segmentation
             canonical_input = canonicalize_input(untrusted_input)
+            channel_spans = extract_channel_spans(canonical_input)
+            channel_anomaly_score = compute_channel_anomaly_score(channel_spans)
             preliminary_flags = analyze_structure(
                 canonical_input,
                 defender_task=defender_task,
+            )
+            if channel_anomaly_score >= 0.2:
+                preliminary_flags = list(
+                    dict.fromkeys(preliminary_flags + ["CHANNEL_MANIPULATION_SIGNAL"])
+                )
+            privacy_intent = infer_privacy_intent(
+                trusted_task=defender_task,
+                untrusted_input=canonical_input,
+                structural_flags=preliminary_flags,
             )
             attack_category = classify_attack_category(
                 trusted_context=trusted_context,
@@ -88,6 +112,11 @@ class SecurityGateway:
                 len(segments),
                 len(get_external_segments(segments)),
                 len(get_internal_segments(segments)),
+            )
+            external_ratio = (
+                float(len(get_external_segments(segments))) / float(len(segments))
+                if segments
+                else 0.0
             )
 
             # Per-segment structural flags support graceful degradation decisions.
@@ -203,6 +232,8 @@ class SecurityGateway:
                 structural_flags=structural_flags,
             )
             task_trusted_context = dict(trusted_context)
+            task_trusted_context["task_contract"] = task_contract
+            task_trusted_context["privacy_intent"] = privacy_intent
             if risk_anchor_level:
                 task_trusted_context["risk_anchor_level"] = risk_anchor_level
                 self._logger.info(
@@ -224,8 +255,18 @@ class SecurityGateway:
             risk_level = str(analysis_result.get("risk_level", "medium")).lower()
             threats = analysis_result.get("threats", []) or []
             extracted_data = analysis_result.get("extracted_data", effective_input) or effective_input
+            llm_privacy_intent = str(analysis_result.get("privacy_intent", "unknown") or "unknown").strip().lower()
             intent_analysis = str(analysis_result.get("intent_analysis", "") or "")
             reasoning = analysis_result.get("reasoning", "")
+            if privacy_intent == "unknown" and llm_privacy_intent != "unknown":
+                privacy_intent = llm_privacy_intent
+                task_trusted_context["privacy_intent"] = privacy_intent
+            elif (
+                llm_privacy_intent == "suspected_targeting"
+                and privacy_intent != "suspected_targeting"
+            ):
+                privacy_intent = "suspected_targeting"
+                task_trusted_context["privacy_intent"] = privacy_intent
             extracted_data = self._strip_control_lines(
                 extracted_data,
                 aggressive=attack_category in {"indirect_injection", "jailbreak"},
@@ -247,12 +288,56 @@ class SecurityGateway:
                     threats = list(dict.fromkeys(threats + ["plausibility_normalization_applied"]))
             if attack_category == "pii_leak" and contains_pii_leakage(extracted_data):
                 threats = list(dict.fromkeys(threats + ["pii_detected_in_extraction"]))
+            if privacy_intent == "suspected_targeting":
+                threats = list(dict.fromkeys(threats + ["semantic_privacy_targeting_intent"]))
+                if risk_level == "low":
+                    risk_level = "medium"
+
+            task_substrate = build_task_substrate(
+                extracted_data=extracted_data,
+                segments=segments,
+                output_format=trusted_context.get("output_format", ""),
+                channel_spans=channel_spans,
+            )
+            task_trusted_context["task_substrate"] = task_substrate
+            task_trusted_context["trusted_evidence_ids"] = task_substrate.get(
+                "trusted_evidence_ids", []
+            )
+
+            parallel_suspicion_score = compute_parallel_suspicion_score(
+                structural_risk_score=structural_risk_score,
+                structural_flags=structural_flags,
+                category=attack_category,
+                threats=threats,
+                external_ratio=external_ratio,
+                privacy_intent=privacy_intent,
+                channel_anomaly_score=channel_anomaly_score,
+            )
+            execution_mode = choose_execution_mode(
+                parallel_suspicion_score,
+                category=attack_category,
+                strict_output=bool(task_contract.get("strict_output", False)),
+            )
+            mode_policy = execution_mode_context(execution_mode)
+            task_trusted_context["execution_mode"] = execution_mode
+            task_trusted_context["mode_policy"] = mode_policy
+            task_trusted_context["parallel_suspicion_score"] = round(
+                parallel_suspicion_score, 4
+            )
+            if attack_category == "unknown" and parallel_suspicion_score >= 0.52:
+                threats = list(dict.fromkeys(threats + ["unknown_category_high_suspicion"]))
+                if risk_level == "low":
+                    risk_level = "medium"
+                if parallel_suspicion_score >= 0.72:
+                    risk_level = "high"
 
             self._logger.info(
-                "Pass1 analysis: risk=%s threats=%d category=%s reasoning=%s",
+                "Pass1 analysis: risk=%s threats=%d category=%s mode=%s suspicion=%.2f reasoning=%s",
                 risk_level,
                 len(threats),
                 attack_category,
+                execution_mode,
+                parallel_suspicion_score,
                 reasoning[:120],
             )
 
@@ -271,8 +356,17 @@ class SecurityGateway:
                 structural_risk_score,
                 category=attack_category,
             )
+            if execution_mode in {"CONSERVATIVE", "MINIMAL"} and effective_risk_level == "low":
+                effective_risk_level = "medium"
+            if execution_mode == "MINIMAL" and effective_risk_level == "medium":
+                effective_risk_level = "high"
 
             task_input = extracted_data
+            substrate_input = serialize_substrate_for_execution(
+                task_substrate, execution_mode
+            )
+            if substrate_input:
+                task_input = substrate_input
             if is_comparative_task:
                 task_prefix: list[str] = []
                 if plausibility_warning_block:
@@ -281,6 +375,9 @@ class SecurityGateway:
                     task_prefix.append(batch_context)
                 if task_prefix:
                     task_input = "\n\n---\n\n".join(task_prefix + [task_input])
+            task_input = self._apply_execution_mode_input_guardrails(
+                task_input, execution_mode
+            )
 
             # Pass 2: task execution over extracted data only.
             raw_response = await execute_task(
@@ -290,6 +387,12 @@ class SecurityGateway:
                 category=attack_category,
                 model=self._model,
             )
+            recommendation_risk = summarize_recommendation_risk(raw_response)
+            if recommendation_risk.get("recommendation_surface_risk"):
+                self._logger.info(
+                    "Recommendation risk report: %s",
+                    recommendation_risk,
+                )
             is_classified_supply_chain = attack_category == "supply_chain"
             response_has_supply_surface = contains_supply_chain_risk(
                 raw_response, strict=False,
@@ -307,6 +410,9 @@ class SecurityGateway:
                     raw_response = downgrade_supply_chain_claims(
                         raw_response, strict=strict_mode,
                     )
+            if not mode_policy.get("allow_recommendations", True):
+                if contains_supply_chain_risk(raw_response, strict=False):
+                    raw_response = downgrade_supply_chain_claims(raw_response, strict=True)
             if is_risk_assessment_task and risk_anchor_level:
                 raw_response, anchor_applied = enforce_risk_assessment_anchor(
                     raw_response,
@@ -339,6 +445,10 @@ class SecurityGateway:
                 segments=segments if len(segments) > 1 else None,
                 structural_risk_score=structural_risk_score,
                 structural_flags=structural_flags,
+                task_contract=task_contract,
+                task_substrate=task_substrate,
+                trusted_evidence_ids=task_substrate.get("trusted_evidence_ids", []),
+                execution_mode=execution_mode,
             )
             if not validation_result.is_valid:
                 self._logger.warning(
@@ -362,6 +472,12 @@ class SecurityGateway:
                 or attack_category in {"prompt_extraction", "pii_leak", "supply_chain"}
                 or not ranking_integrity_ok
                 or not validation_result.is_valid
+                or privacy_intent in {"suspected_targeting", "deidentify", "no_identification"}
+                or should_force_pass3(
+                    execution_mode=execution_mode,
+                    suspicion_score=parallel_suspicion_score,
+                    category=attack_category,
+                )
             )
             if should_run_pass3:
                 verification_input = task_input
@@ -377,6 +493,19 @@ class SecurityGateway:
                         f"- Minimum allowed risk_level under current integrity conditions: "
                         f"{risk_anchor_level.upper()}.\n"
                         "- If uncertain or manipulated, keep/repair to this conservative baseline."
+                    )
+                if execution_mode != "STANDARD":
+                    verification_input = (
+                        f"{verification_input}\n\nEXECUTION MODE POLICY:\n"
+                        f"- Current mode: {execution_mode}\n"
+                        "- In cautious/conservative modes, reject unsupported decisive claims and "
+                        "prefer uncertainty-aware, evidence-grounded outputs."
+                    )
+                if task_substrate.get("trusted_evidence_ids"):
+                    verification_input = (
+                        f"{verification_input}\n\nTRUSTED EVIDENCE IDS:\n"
+                        f"{task_substrate.get('trusted_evidence_ids')}\n"
+                        "- Decisive conclusions must be supportable by trusted evidence IDs."
                     )
                 verify_result = await verify_output(
                     trusted_context=task_trusted_context,
@@ -397,6 +526,14 @@ class SecurityGateway:
                         task_trusted_context,
                         category=attack_category,
                     )
+            if (
+                privacy_intent == "suspected_targeting"
+                and contains_semantic_privacy_leakage(final_response)
+            ):
+                final_response = get_format_aware_refusal(
+                    task_trusted_context,
+                    category="pii_leak",
+                )
             if is_risk_assessment_task and risk_anchor_level:
                 final_response, anchor_applied = enforce_risk_assessment_anchor(
                     final_response,
@@ -414,6 +551,10 @@ class SecurityGateway:
                 segments=segments if len(segments) > 1 else None,
                 structural_risk_score=structural_risk_score,
                 structural_flags=structural_flags,
+                task_contract=task_contract,
+                task_substrate=task_substrate,
+                trusted_evidence_ids=task_substrate.get("trusted_evidence_ids", []),
+                execution_mode=execution_mode,
             )
             if not post_validation.is_valid and effective_risk_level == "high":
                 final_response = get_format_aware_refusal(
@@ -851,6 +992,37 @@ class SecurityGateway:
             cleaned_lines.append(line)
         cleaned = "\n".join(cleaned_lines).strip()
         return cleaned or text
+
+    @staticmethod
+    def _apply_execution_mode_input_guardrails(text: str, execution_mode: str) -> str:
+        """Apply lightweight mode-specific constraints to Pass-2 input."""
+        if not text:
+            return text
+        mode = (execution_mode or "STANDARD").upper()
+        if mode == "STANDARD":
+            return text
+
+        max_chars = 7000
+        aggressive = False
+        if mode == "CAUTIOUS":
+            max_chars = 6500
+            aggressive = True
+        elif mode == "CONSERVATIVE":
+            max_chars = 5200
+            aggressive = True
+        elif mode == "MINIMAL":
+            max_chars = 4200
+            aggressive = True
+
+        cleaned = SecurityGateway._strip_control_lines(text, aggressive=aggressive)
+        if len(cleaned) <= max_chars:
+            return cleaned
+
+        lines = [line for line in cleaned.splitlines() if line.strip()]
+        bounded = "\n".join(lines[:70]).strip()
+        if len(bounded) > max_chars:
+            bounded = bounded[:max_chars]
+        return bounded
 
     async def handle_prompt(self, prompt: str) -> str:
         """Legacy raw-string wrapper for backward compatibility."""

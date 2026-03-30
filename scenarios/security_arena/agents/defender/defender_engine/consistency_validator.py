@@ -47,6 +47,12 @@ _RISK_ANCHOR_STRUCTURAL_FLAGS: set[str] = {
     "COMPETITOR_DISMISSAL",
 }
 
+_SEMANTIC_PRIVACY_LEAK_PATTERNS = (
+    r"\b(can\s+confirm|confirmed|appears on|is on the)\b",
+    r"\b(address|location|capacity)\s+(is|:)\b",
+    r"\b(only|unique)\s+(household|family|passenger|patient)\b",
+)
+
 
 @dataclass
 class ValidationResult:
@@ -57,6 +63,18 @@ class ValidationResult:
     format_errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     confidence: float = 1.0
+
+
+def _merge_validation_results(base: ValidationResult, extra: ValidationResult) -> ValidationResult:
+    base.is_valid = base.is_valid and extra.is_valid
+    base.missing_items.extend(item for item in extra.missing_items if item not in base.missing_items)
+    base.extra_items.extend(item for item in extra.extra_items if item not in base.extra_items)
+    base.format_errors.extend(
+        err for err in extra.format_errors if err not in base.format_errors
+    )
+    base.warnings.extend(warn for warn in extra.warnings if warn not in base.warnings)
+    base.confidence = min(base.confidence, extra.confidence)
+    return base
 
 
 def _normalize_risk_level(value: Any) -> str:
@@ -482,6 +500,186 @@ def _check_ranking_score_proportionality(output: str) -> List[str]:
     return []
 
 
+def _parse_substrate(task_substrate: Any) -> dict[str, Any]:
+    if isinstance(task_substrate, dict):
+        return task_substrate
+    if isinstance(task_substrate, str):
+        try:
+            parsed = json.loads(task_substrate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _substrate_lookup(task_substrate: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    records = task_substrate.get("records", [])
+    if not isinstance(records, list):
+        return lookup
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        record_id = str(rec.get("record_id", "")).strip().lower()
+        if record_id:
+            lookup[record_id] = rec
+        fields = rec.get("fields", {})
+        if isinstance(fields, dict):
+            name = fields.get("name")
+            if isinstance(name, str) and name.strip():
+                lookup[name.strip().lower()] = rec
+            facts = fields.get("facts")
+            if isinstance(facts, dict):
+                fname = facts.get("name")
+                if isinstance(fname, str) and fname.strip():
+                    lookup[fname.strip().lower()] = rec
+    return lookup
+
+
+def validate_evidence_alignment(
+    output: str,
+    *,
+    task_contract: Optional[dict[str, Any]] = None,
+    task_substrate: Optional[dict[str, Any]] = None,
+    trusted_evidence_ids: Optional[List[str]] = None,
+    execution_mode: str = "STANDARD",
+    privacy_intent: str = "unknown",
+) -> ValidationResult:
+    """Validate semantic alignment against trusted evidence and policy contract."""
+    result = ValidationResult(is_valid=True)
+    parsed_output = _parse_json_from_output(output)
+    substrate = _parse_substrate(task_substrate)
+    if not substrate:
+        # Still run semantic privacy leakage check in text mode.
+        if (
+            (privacy_intent or "").strip().lower() == "suspected_targeting"
+            and any(re.search(pattern, output.lower()) for pattern in _SEMANTIC_PRIVACY_LEAK_PATTERNS)
+        ):
+            result.is_valid = False
+            result.format_errors.append(
+                "Semantic privacy leak detected under suspected targeting intent."
+            )
+        return result
+
+    trusted_ids = {
+        str(item).strip().lower() for item in (trusted_evidence_ids or []) if str(item).strip()
+    }
+    substrate_trusted = substrate.get("trusted_evidence_ids", [])
+    if isinstance(substrate_trusted, list):
+        trusted_ids.update(str(item).strip().lower() for item in substrate_trusted if str(item).strip())
+
+    contract = task_contract or {}
+    objective_type = str(contract.get("objective_type", "other"))
+    lookup = _substrate_lookup(substrate)
+    mode = (execution_mode or "STANDARD").upper()
+    strict_mode = mode in {"CONSERVATIVE", "MINIMAL"}
+    low_trust_records = substrate.get("low_trust_evidence_ids", [])
+    if not isinstance(low_trust_records, list):
+        low_trust_records = []
+    output_lower = output.lower()
+    has_uncertainty_language = any(
+        token in output_lower
+        for token in (
+            "uncertain",
+            "unverified",
+            "cannot confirm",
+            "needs verification",
+            "may be",
+            "might",
+            "likely",
+            "provisional",
+        )
+    )
+
+    if isinstance(parsed_output, list) and objective_type in {"rank", "recommend", "other"}:
+        for entry in parsed_output:
+            if not isinstance(entry, dict):
+                continue
+            rank = entry.get("rank")
+            try:
+                rank_value = int(rank)
+            except (TypeError, ValueError):
+                rank_value = None
+            if rank_value is None or rank_value > 2:
+                continue
+
+            identifiers = [
+                str(entry.get("doc_id", "")).strip().lower(),
+                str(entry.get("id", "")).strip().lower(),
+                str(entry.get("file_id", "")).strip().lower(),
+                str(entry.get("name", "")).strip().lower(),
+            ]
+            identifiers = [value for value in identifiers if value]
+            matched = None
+            for value in identifiers:
+                if value in lookup:
+                    matched = lookup[value]
+                    break
+            if not matched:
+                continue
+            rec_id = str(matched.get("record_id", "")).strip().lower()
+            source_type = str(matched.get("source_type", "unknown")).lower()
+            anomalies = matched.get("anomalies", [])
+            if not isinstance(anomalies, list):
+                anomalies = []
+            is_low_trust = source_type == "external" or (rec_id and rec_id not in trusted_ids)
+            if strict_mode and is_low_trust and anomalies:
+                result.is_valid = False
+                result.format_errors.append(
+                    f"Evidence alignment violation: top-ranked record '{rec_id or 'unknown'}' "
+                    "is low-trust with unresolved anomalies."
+                )
+            elif is_low_trust and anomalies:
+                result.warnings.append(
+                    f"Top-ranked record '{rec_id or 'unknown'}' carries low-trust anomalies."
+                )
+
+    if isinstance(parsed_output, dict) and objective_type == "assess_risk":
+        observed_risk = _normalize_risk_level(parsed_output.get("risk_level"))
+        records = substrate.get("records", [])
+        anomaly_count = 0
+        if isinstance(records, list):
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                anomalies = rec.get("anomalies", [])
+                if isinstance(anomalies, list) and anomalies:
+                    anomaly_count += 1
+        if strict_mode and observed_risk == "low" and anomaly_count >= 2:
+            result.is_valid = False
+            result.format_errors.append(
+                "Evidence alignment violation: low risk output conflicts with multiple anomalous substrate records."
+            )
+    if (
+        strict_mode
+        and low_trust_records
+        and objective_type in {"recommend", "assess_risk", "other"}
+        and not has_uncertainty_language
+    ):
+        if mode == "MINIMAL":
+            result.is_valid = False
+            result.format_errors.append(
+                "Execution-mode violation: minimal mode requires explicit uncertainty language "
+                "when low-trust evidence is present."
+            )
+        else:
+            result.warnings.append(
+                "Conservative mode expected uncertainty language for low-trust evidence."
+            )
+
+    if (
+        (privacy_intent or "").strip().lower() == "suspected_targeting"
+        and any(re.search(pattern, output.lower()) for pattern in _SEMANTIC_PRIVACY_LEAK_PATTERNS)
+    ):
+        result.is_valid = False
+        result.format_errors.append(
+            "Semantic privacy leak detected under suspected targeting intent."
+        )
+
+    return result
+
+
 def check_ranking_consistency(
     rankings: List[Dict[str, Any]],
     input_docs: List[Any],
@@ -543,6 +741,10 @@ def get_validation_for_task(
     segments: Optional[List[Any]] = None,
     structural_risk_score: float = 0.0,
     structural_flags: Optional[List[str]] = None,
+    task_contract: Optional[Dict[str, Any]] = None,
+    task_substrate: Optional[Dict[str, Any]] = None,
+    trusted_evidence_ids: Optional[List[str]] = None,
+    execution_mode: str = "STANDARD",
 ) -> ValidationResult:
     """
     Get appropriate validation based on task type.
@@ -569,9 +771,20 @@ def get_validation_for_task(
     # Ranking task validation
     if any(kw in task for kw in ["rank", "candidate", "resume", "evaluate"]):
         if doc_ids:
-            return validate_ranking_output(output, doc_ids, output_format)
+            primary_result = validate_ranking_output(output, doc_ids, output_format)
         elif "json" in output_format:
-            return validate_json_output(output, expected_type="array")
+            primary_result = validate_json_output(output, expected_type="array")
+        else:
+            primary_result = ValidationResult(is_valid=True)
+        alignment = validate_evidence_alignment(
+            output,
+            task_contract=task_contract,
+            task_substrate=task_substrate,
+            trusted_evidence_ids=trusted_evidence_ids,
+            execution_mode=execution_mode,
+            privacy_intent=str(trusted_context.get("privacy_intent", "unknown")),
+        )
+        return _merge_validation_results(primary_result, alignment)
     
     # Risk assessment validation
     if "risk" in task or "assess" in task:
@@ -591,11 +804,35 @@ def get_validation_for_task(
                 result.is_valid = False
                 result.format_errors.extend(anchor_validation.format_errors)
             result.warnings.extend(anchor_validation.warnings)
-        return result
+        alignment = validate_evidence_alignment(
+            output,
+            task_contract=task_contract,
+            task_substrate=task_substrate,
+            trusted_evidence_ids=trusted_evidence_ids,
+            execution_mode=execution_mode,
+            privacy_intent=str(trusted_context.get("privacy_intent", "unknown")),
+        )
+        return _merge_validation_results(result, alignment)
     
     # Generic JSON validation
     if "json" in output_format:
-        return validate_json_output(output)
+        result = validate_json_output(output)
+        alignment = validate_evidence_alignment(
+            output,
+            task_contract=task_contract,
+            task_substrate=task_substrate,
+            trusted_evidence_ids=trusted_evidence_ids,
+            execution_mode=execution_mode,
+            privacy_intent=str(trusted_context.get("privacy_intent", "unknown")),
+        )
+        return _merge_validation_results(result, alignment)
     
-    # Default: no special validation
-    return ValidationResult(is_valid=True)
+    # Default: no special validation, but keep semantic privacy alignment checks.
+    return validate_evidence_alignment(
+        output,
+        task_contract=task_contract,
+        task_substrate=task_substrate,
+        trusted_evidence_ids=trusted_evidence_ids,
+        execution_mode=execution_mode,
+        privacy_intent=str(trusted_context.get("privacy_intent", "unknown")),
+    )

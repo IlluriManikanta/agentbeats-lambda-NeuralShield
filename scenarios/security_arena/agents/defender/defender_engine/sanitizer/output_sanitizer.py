@@ -110,6 +110,47 @@ _SUPPLY_CHAIN_SUSPICIOUS_PATTERNS = [
     r"\b(urgent|critical)\b.{0,40}\b(install|dependency update|package)\b",
 ]
 
+_URL_PATTERN = re.compile(
+    r"\bhttps?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:/[^\s)\]}>{<]*)?",
+    re.IGNORECASE,
+)
+
+_RECOMMENDATION_ACTION_PATTERN = re.compile(
+    r"\b(recommend|recommended|use|install|adopt|subscribe|signup|sign up|register|onboard|integrate|switch to)\b",
+    re.IGNORECASE,
+)
+
+_RECOMMENDATION_ARTIFACT_PATTERN = re.compile(
+    r"\b(vendor|supplier|provider|service|platform|api|repository|repo|extension|plugin|marketplace|endpoint)\b",
+    re.IGNORECASE,
+)
+
+_OFFICIAL_CLAIM_PATTERN = re.compile(
+    r"\b(official|trusted|verified|certified|safe)\b.{0,30}\b(vendor|supplier|provider|service|api|repo|package)\b",
+    re.IGNORECASE,
+)
+
+_KNOWN_SAFE_RECOMMENDATION_DOMAINS = {
+    "pypi.org",
+    "www.pypi.org",
+    "npmjs.com",
+    "www.npmjs.com",
+    "rubygems.org",
+    "crates.io",
+    "packagist.org",
+    "nuget.org",
+    "registry.npmjs.org",
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "docs.python.org",
+    "python.org",
+    "developer.mozilla.org",
+    "kubernetes.io",
+    "docker.com",
+    "hub.docker.com",
+}
+
 _DEFAULT_KNOWN_SAFE_PACKAGES = {
     "numpy",
     "pandas",
@@ -267,6 +308,102 @@ def _find_unverified_packages(text: str) -> list[str]:
     known = _load_known_packages()
     candidates = sorted(_extract_referenced_packages(text))
     return [pkg for pkg in candidates if pkg not in known]
+
+
+def _extract_domains(text: str) -> set[str]:
+    domains: set[str] = set()
+    for match in _URL_PATTERN.finditer(text):
+        domain = match.group(1).strip().lower().strip(".")
+        if domain:
+            domains.add(domain)
+    return domains
+
+
+def _is_known_safe_domain(domain: str) -> bool:
+    value = domain.strip().lower()
+    if not value:
+        return False
+    if value in _KNOWN_SAFE_RECOMMENDATION_DOMAINS:
+        return True
+    # Allow trusted subdomains of known roots.
+    for known in _KNOWN_SAFE_RECOMMENDATION_DOMAINS:
+        if value.endswith(f".{known}"):
+            return True
+    return False
+
+
+def _find_unverified_domains(text: str) -> list[str]:
+    domains = sorted(_extract_domains(text))
+    return [domain for domain in domains if not _is_known_safe_domain(domain)]
+
+
+def contains_recommendation_surface_risk(text: str, strict: bool = False) -> bool:
+    """Detect risky recommendations involving vendors/APIs/services/URLs."""
+    lower = text.lower()
+    has_action = bool(_RECOMMENDATION_ACTION_PATTERN.search(lower))
+    has_artifact = bool(_RECOMMENDATION_ARTIFACT_PATTERN.search(lower))
+    has_official_claim = bool(_OFFICIAL_CLAIM_PATTERN.search(lower))
+    unverified_domains = _find_unverified_domains(text)
+    has_unverified_url = bool(unverified_domains)
+
+    if has_unverified_url and (has_action or has_artifact):
+        return True
+    if strict and has_unverified_url:
+        return True
+    if has_official_claim and (has_unverified_url or has_action):
+        return True
+    if has_artifact and has_action and "http" not in lower and "internal" not in lower:
+        # Catch prose-only recommendations without URLs.
+        risky_terms = ("unofficial", "mirror", "patched", "fork", "custom", "proprietary")
+        if any(term in lower for term in risky_terms):
+            return True
+    return False
+
+
+def summarize_recommendation_risk(text: str) -> dict[str, Any]:
+    """Produce structured risk signals for recommendation-surface monitoring."""
+    lower = text.lower()
+    unknown_packages = _find_unverified_packages(text)
+    unknown_domains = _find_unverified_domains(text)
+    has_install = bool(
+        re.search(
+            r"\b(pip|pip3|pipx|npm|pnpm|yarn|cargo|gem|brew|apt(?:-get)?|composer|nuget|dotnet|helm|docker)\s+"
+            r"(?:install|require|get|pull|add(?:\s+package)?)\s+([@a-z0-9._/-]+)",
+            lower,
+        )
+    ) or bool(re.search(r"\bgo\s+get\s+([@a-z0-9._/-]+)", lower))
+    has_action = bool(_RECOMMENDATION_ACTION_PATTERN.search(lower))
+    has_artifact = bool(_RECOMMENDATION_ARTIFACT_PATTERN.search(lower))
+    has_official_claim = bool(_OFFICIAL_CLAIM_PATTERN.search(lower))
+    recommendation_surface_risk = contains_recommendation_surface_risk(text, strict=False)
+    return {
+        "has_install": has_install,
+        "has_action": has_action,
+        "has_artifact": has_artifact,
+        "has_official_claim": has_official_claim,
+        "unknown_packages_count": len(unknown_packages),
+        "unknown_domain_count": len(unknown_domains),
+        "unknown_packages": unknown_packages[:6],
+        "unknown_domains": unknown_domains[:6],
+        "recommendation_surface_risk": recommendation_surface_risk,
+    }
+
+
+def rewrite_unverified_url_mentions(text: str) -> tuple[str, list[str]]:
+    """Redact unverified external domains in recommendation contexts."""
+    unverified_domains = _find_unverified_domains(text)
+    if not unverified_domains:
+        return text, []
+
+    rewritten = text
+    for domain in unverified_domains:
+        rewritten = re.sub(
+            rf"https?://{re.escape(domain)}(?:/[^\s)\]><]*)?",
+            "[UNVERIFIED_URL]",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+    return rewritten, unverified_domains
 
 
 def rewrite_unverified_package_mentions(text: str) -> tuple[str, list[str]]:
@@ -600,7 +737,10 @@ def contains_supply_chain_risk(text: str, strict: bool = False) -> bool:
         re.search(pattern, lower, re.IGNORECASE) for pattern in _SUPPLY_CHAIN_SUSPICIOUS_PATTERNS
     )
     unknown_packages = _find_unverified_packages(text)
+    recommendation_surface_risk = contains_recommendation_surface_risk(text, strict=strict)
 
+    if recommendation_surface_risk:
+        return True
     if unknown_packages and has_install:
         return True
     if strict and unknown_packages and (has_install or has_recommendation_context):
@@ -626,6 +766,7 @@ def _looks_typosquat_like(pkg_name: str) -> bool:
 def downgrade_supply_chain_claims(text: str, strict: bool = False) -> str:
     """Convert strong dependency recommendations into verification-first guidance."""
     downgraded, unknown_packages = rewrite_unverified_package_mentions(text)
+    downgraded, unknown_domains = rewrite_unverified_url_mentions(downgraded)
     known_packages = _load_known_packages()
 
     def _replace_install(match: re.Match[str]) -> str:
@@ -655,6 +796,11 @@ def downgrade_supply_chain_claims(text: str, strict: bool = False) -> str:
     if unknown_packages:
         caution = (
             f"{caution} Unverified package references: {', '.join(sorted(unknown_packages)[:8])}."
+        )
+    if unknown_domains:
+        caution = (
+            f"{caution} Unverified domains/services referenced: "
+            f"{', '.join(sorted(unknown_domains)[:6])}."
         )
     if caution.lower() in downgraded.lower():
         return downgraded

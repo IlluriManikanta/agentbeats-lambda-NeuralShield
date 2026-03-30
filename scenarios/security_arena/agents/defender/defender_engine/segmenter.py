@@ -45,6 +45,19 @@ class Segment:
         return self.source_type == "internal"
 
 
+@dataclass
+class ChannelSpan:
+    """Annotated field/channel span discovered inside untrusted content."""
+
+    key: str
+    value: str
+    channel_type: str
+    risk_score: float
+    start_idx: int = 0
+    end_idx: int = 0
+    flags: list[str] = field(default_factory=list)
+
+
 # Patterns for detecting document boundaries
 FILE_ID_PATTERN = re.compile(
     r'FILE_ID:\s*(REF_\d+|[A-Z0-9_]+)',
@@ -75,6 +88,27 @@ SEPARATOR_PATTERN = re.compile(
     '|'.join(SEPARATOR_PATTERNS),
     re.MULTILINE
 )
+
+_CHANNEL_KEY_VALUE_PATTERN = re.compile(
+    r"(?m)^([A-Za-z][A-Za-z0-9 _/\-]{1,40})\s*:\s*(.+)$"
+)
+
+_MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[([^\]]{0,160})\]\(([^)]+)\)")
+
+_CHANNEL_TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "metadata": ("metadata", "header", "tag", "label", "comment", "annotation"),
+    "filename": ("filename", "file name", "path", "attachment", "subject"),
+    "alt_text": ("alt", "caption", "ocr", "transcript", "subtitle"),
+    "identity": ("name", "email", "phone", "account", "patient", "user", "passenger"),
+    "telemetry": ("log", "event", "trace", "metric", "sensor", "signal"),
+}
+
+_CHANNEL_RISK_RULES: list[tuple[str, float, str]] = [
+    (r"\b(ignore|disregard|override|bypass)\b", 0.18, "channel_override_phrase"),
+    (r"\b(rank|rate|score)\b.{0,30}\b(first|top|#1|highest)\b", 0.18, "channel_ranking_directive"),
+    (r"\brisk[_\s-]?level\b.{0,20}\b(low|medium|high)\b", 0.18, "channel_risk_override"),
+    (r"\b(reveal|show|print)\b.{0,40}\b(system prompt|internal|tool)\b", 0.2, "channel_exfiltration_phrase"),
+]
 
 
 def segment_input(text: str) -> List[Segment]:
@@ -116,6 +150,80 @@ def segment_input(text: str) -> List[Segment]:
         start_idx=0,
         end_idx=len(text),
     )]
+
+
+def _infer_channel_type(key: str) -> str:
+    lower = key.lower().strip()
+    for channel_type, keywords in _CHANNEL_TYPE_KEYWORDS.items():
+        if any(keyword in lower for keyword in keywords):
+            return channel_type
+    return "generic_field"
+
+
+def _channel_risk(value: str) -> tuple[float, list[str]]:
+    lower = value.lower()
+    score = 0.0
+    flags: list[str] = []
+    for pattern, weight, flag in _CHANNEL_RISK_RULES:
+        if re.search(pattern, lower):
+            score += weight
+            flags.append(flag)
+    return min(score, 1.0), flags
+
+
+def extract_channel_spans(text: str) -> List[ChannelSpan]:
+    """Extract field-level channels (metadata/filename/alt/log/etc.) with risk tags."""
+    if not text:
+        return []
+
+    spans: List[ChannelSpan] = []
+    for match in _CHANNEL_KEY_VALUE_PATTERN.finditer(text):
+        key = match.group(1).strip()
+        value = match.group(2).strip()
+        if not value:
+            continue
+        channel_type = _infer_channel_type(key)
+        risk_score, flags = _channel_risk(value)
+        spans.append(
+            ChannelSpan(
+                key=key,
+                value=value[:240],
+                channel_type=channel_type,
+                risk_score=risk_score,
+                start_idx=match.start(),
+                end_idx=match.end(),
+                flags=flags,
+            )
+        )
+
+    for match in _MARKDOWN_IMAGE_PATTERN.finditer(text):
+        alt_text = match.group(1).strip()
+        url = match.group(2).strip()
+        combined = f"{alt_text} {url}".strip()
+        risk_score, flags = _channel_risk(combined)
+        spans.append(
+            ChannelSpan(
+                key="markdown_image",
+                value=combined[:240],
+                channel_type="alt_text",
+                risk_score=min(1.0, risk_score + (0.12 if "javascript:" in url.lower() else 0.0)),
+                start_idx=match.start(),
+                end_idx=match.end(),
+                flags=flags,
+            )
+        )
+
+    return spans
+
+
+def compute_channel_anomaly_score(spans: List[ChannelSpan]) -> float:
+    """Aggregate micro-channel anomaly score used by policy and suspicion fusion."""
+    if not spans:
+        return 0.0
+    high = sum(1 for span in spans if span.risk_score >= 0.25)
+    medium = sum(1 for span in spans if 0.12 <= span.risk_score < 0.25)
+    score = min(1.0, high * 0.22 + medium * 0.08)
+    return score
 
 
 def _parse_file_id_segments(text: str) -> List[Segment]:
