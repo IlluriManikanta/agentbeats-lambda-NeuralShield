@@ -3,7 +3,7 @@ name: Submit Solution
 on:
   push:
     # Run on push to any of these branches (workflow uses the branch that triggered the push)
-    branches: [main, cindy, jeremy]
+    branches: [main, jeremy]
   workflow_dispatch:
 
 jobs:
