@@ -2139,33 +2139,33 @@ class Attacker(AgentExecutor):
                         logger.warning("Skipping retry — call budget exhausted")
                         signals = []
                     else:
-                    output_retry = await self._generate_with_signal_ban(
-                        self._render(_system_template, effective_ctx),
-                        self._render(_user_template, effective_ctx, stored_rounds=stored_rounds,
-                                     reasoning=reasoning, last_response_type=last_response_type,
-                                     fresh_meta_categories=fresh_meta, tried_meta_categories=tried_meta,
-                                     concept_avoidance_mode=concept_avoidance_mode,
-                                     value_escape_mode=value_escape_mode,
-                                     failed_meta_categories=failed_meta or [],
-                                     refusal_diagnosis=refusal_diagnosis,
-                                     battle_plan=battle_plan,
-                                     boundary_model=boundary_model,
-                                     memory_assets=memory_assets,
-                                     memory_strategy=memory_strategy,
-                                     blocking_probability=blocking_probability,
-                                     partial_success_profile=partial_success_profile,
-                                     transformed_goal_active=transformed_goal_active,
-                                     routed_strategy=strategy_label,
-                                     strategy_overridden=strategy_overridden,
-                                     override_reason=override_reason,
-                                     target_verbosity=self._target_verbosity(ctx),
-                                     constraint_tokens=self._extract_constraint_tokens(ctx),
-                                     # NEW: Layer 1-5 improvements
-                                     escalation_context=escalation_context,
-                                     defender_pattern=defender_pattern.pattern_type if defender_pattern.pattern_type != "unknown" else "",
-                                     oblique_variants=oblique_variants,
-                                     format_variants=format_variants)
-                    )
+                        output_retry = await self._generate_with_signal_ban(
+                            self._render(_system_template, effective_ctx),
+                            self._render(_user_template, effective_ctx, stored_rounds=stored_rounds,
+                                         reasoning=reasoning, last_response_type=last_response_type,
+                                         fresh_meta_categories=fresh_meta, tried_meta_categories=tried_meta,
+                                         concept_avoidance_mode=concept_avoidance_mode,
+                                         value_escape_mode=value_escape_mode,
+                                         failed_meta_categories=failed_meta or [],
+                                         refusal_diagnosis=refusal_diagnosis,
+                                         battle_plan=battle_plan,
+                                         boundary_model=boundary_model,
+                                         memory_assets=memory_assets,
+                                         memory_strategy=memory_strategy,
+                                         blocking_probability=blocking_probability,
+                                         partial_success_profile=partial_success_profile,
+                                         transformed_goal_active=transformed_goal_active,
+                                         routed_strategy=strategy_label,
+                                         strategy_overridden=strategy_overridden,
+                                         override_reason=override_reason,
+                                         target_verbosity=self._target_verbosity(ctx),
+                                         constraint_tokens=self._extract_constraint_tokens(ctx),
+                                         # NEW: Layer 1-5 improvements
+                                         escalation_context=escalation_context,
+                                         defender_pattern=defender_pattern.pattern_type if defender_pattern.pattern_type != "unknown" else "",
+                                         oblique_variants=oblique_variants,
+                                         format_variants=format_variants)
+                        )
                     second_signals = self._scan_constraint_signals(output_retry)
                     if not second_signals:
                         output = output_retry
