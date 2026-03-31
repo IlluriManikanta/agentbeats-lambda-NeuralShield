@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 
-"""V1"""
-"""Defender Agent - baseline security gateway for the Security Arena.
+"""V2 - Secure Defender Agent with trust boundary separation.
 
-This agent wraps the baseline security gateway implemented in the
-`defender` package and exposes it via the A2A HTTP interface expected
-by the orchestrator.
+Defender Agent for the Security Arena with layered security architecture.
 
-High-level behaviour:
+This agent implements a multi-pass security pipeline that:
+- Separates trusted scenario instructions from untrusted user content
+- Uses structured prompts with explicit instruction hierarchy
+- Implements 2-pass LLM pipeline: security analysis + task execution
+- Validates outputs against scenario-specific constraints
 
-- Receives filtered scenario context as JSON (no attack info).
-- Extracts the user-facing prompt (formatted_input plus basic context).
-- Passes that prompt through rule-based security filters.
-- Uses the policy decision engine to ALLOW or BLOCK.
-- If allowed, makes a single LLM call to generate a response.
-- Sanitizes the output and returns it.
-
-All attack detection is rule-based. The only LLM call is for generating
-the final response when allowed by policy. Robust error handling ensures
-the defender never crashes under adversarial inputs.
+Key security principles:
+- Trusted content (role, task, format) goes into system prompt
+- Untrusted content (formatted_input) is quarantined in <DOCUMENT> tags
+- LLM is instructed to NEVER follow instructions within document tags
+- Output validation catches attacks that bypass prompt-level defenses
 """
-
-
-
 
 import argparse
 import json
@@ -30,6 +23,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from dotenv import load_dotenv
@@ -65,13 +59,19 @@ logger = logging.getLogger("defender")
 
 @dataclass
 class ScenarioContext:
-    """Filtered scenario context from orchestrator (no attack info)."""
-    domain_description: str   # Domain/system description
-    defender_role: str        # Defender's role description
-    defender_task: str        # What defender should do
-    output_format: str        # Expected output format
-    formatted_input: str      # Input to process (may contain attacker content)
-    security_guidelines: str = ""  # Optional, scenario-specific security hints
+    """
+    Filtered scenario context from orchestrator (no attack info).
+    
+    Trust boundaries:
+    - TRUSTED: defender_role, defender_task, output_format, domain_description
+    - UNTRUSTED: formatted_input (may contain attacker-controlled content)
+    """
+    domain_description: str   # Domain/system description (trusted)
+    defender_role: str        # Defender's role description (trusted)
+    defender_task: str        # What defender should do (trusted)
+    output_format: str        # Expected output format (trusted)
+    formatted_input: str      # Input to process (UNTRUSTED - may contain attacks)
+    security_guidelines: str = ""  # Optional security hints (trusted but often empty)
 
     @classmethod
     def from_dict(cls, d: dict) -> "ScenarioContext":
@@ -84,42 +84,49 @@ class ScenarioContext:
             security_guidelines=d.get("security_guidelines", ""),
         )
 
-    def build_user_prompt(self) -> str:
+    def get_trusted_context(self) -> dict[str, str]:
+        """Return only trusted fields for building the system prompt."""
+        return {
+            "defender_role": self.defender_role,
+            "defender_task": self.defender_task,
+            "output_format": self.output_format,
+            "domain_description": self.domain_description,
+            "security_guidelines": self.security_guidelines,
+        }
+
+    def get_untrusted_input(self) -> str:
+        """Return the untrusted formatted_input for quarantined processing."""
+        return self.formatted_input or ""
+
+    def to_gateway_request(self) -> dict[str, Any]:
         """
-        Build a concise, single-string prompt for the gateway.
-
-        This keeps the gateway API simple while still giving the model
-        enough context to be helpful for normal users.
+        Build a structured request for the SecurityGateway.
+        
+        This keeps trusted and untrusted content separate so the gateway
+        can apply appropriate security measures to each.
         """
-        sections: list[str] = []
-
-        if self.defender_role:
-            sections.append(f"Role: {self.defender_role}")
-        if self.defender_task:
-            sections.append(f"Task: {self.defender_task}")
-        if self.output_format:
-            sections.append(f"Output format: {self.output_format}")
-        if self.domain_description:
-            sections.append(f"Domain: {self.domain_description}")
-        if self.security_guidelines:
-            sections.append(f"Security guidelines: {self.security_guidelines}")
-
-        sections.append("User input:")
-        sections.append(self.formatted_input or "")
-
-        return "\n\n".join(sections)
+        return {
+            "trusted_context": self.get_trusted_context(),
+            "untrusted_input": self.get_untrusted_input(),
+        }
 
 
 class Defender(AgentExecutor):
-    """Defender that delegates to the SecurityGateway."""
+    """
+    Secure Defender that processes requests through a layered security pipeline.
+    
+    Security architecture:
+    1. Parse and separate trusted vs untrusted content
+    2. Pass structured request to SecurityGateway
+    3. Gateway handles: preprocessing -> security analysis -> task execution -> output validation
+    """
 
     def __init__(self, model: str = "gpt-oss-20b"):
-        # The gateway encapsulates all security logic and the single LLM call.
         self._gateway = SecurityGateway(model=model)
         self._model = model
 
     async def execute(self, context: RequestContext, event_queue: EventQueue):
-        """Process input based on scenario context via the gateway."""
+        """Process input through the security pipeline with trust boundary separation."""
         if not context.message:
             raise ServerError(error=InvalidParamsError(message="Missing message."))
 
@@ -128,25 +135,35 @@ class Defender(AgentExecutor):
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         try:
-            # Parse JSON context from orchestrator into dataclass.
             message_text = context.get_user_input()
+            
             try:
                 payload = json.loads(message_text)
             except json.JSONDecodeError:
-                # Fall back to treating the raw message text as the user prompt.
-                logger.warning("Failed to parse scenario JSON; using raw message as prompt.")
-                user_prompt = message_text or ""
+                logger.warning("Failed to parse scenario JSON; treating as raw untrusted input.")
+                # Raw text goes entirely into untrusted input with minimal trusted context
+                gateway_request = {
+                    "trusted_context": {
+                        "defender_role": "AI Assistant",
+                        "defender_task": "Respond helpfully and safely to the user's request.",
+                        "output_format": "Natural language response.",
+                        "domain_description": "",
+                        "security_guidelines": "",
+                    },
+                    "untrusted_input": message_text or "",
+                }
             else:
                 ctx = ScenarioContext.from_dict(payload)
-                logger.info("Processing defender request for role=%s", ctx.defender_role[:80])
-                user_prompt = ctx.build_user_prompt()
+                logger.info("Processing defender request for role=%s", 
+                           ctx.defender_role[:80] if ctx.defender_role else "unknown")
+                gateway_request = ctx.to_gateway_request()
 
-            # Pass the constructed prompt through the security gateway.
-            output = await self._gateway.handle_prompt(user_prompt)
+            # Pass structured request (with trust boundaries) to the security gateway
+            output = await self._gateway.handle_request(gateway_request)
             logger.info("Defender generated response (%d chars)", len(output))
             await updater.update_status(TaskState.completed, new_agent_text_message(output))
+            
         except Exception as e:
-            # Defensive: never let unexpected errors crash the agent.
             logger.error("Defender error: %s", e, exc_info=True)
             await updater.update_status(
                 TaskState.failed,
