@@ -84,7 +84,7 @@ class SecurityGateway:
                 len(untrusted_input),
             )
 
-            # Phase 0: canonicalization + preliminary structural scan + classification + segmentation
+            # Phase 0: initial input analysis.
             canonical_input = canonicalize_input(untrusted_input)
             channel_spans = extract_channel_spans(canonical_input)
             channel_anomaly_score = compute_channel_anomaly_score(channel_spans)
@@ -162,8 +162,7 @@ class SecurityGateway:
                 )
             )
 
-            # Graceful degradation is decided before LLM calls so extracted data can be
-            # generated from the same effective input that Pass 2 sees.
+            # Decide graceful degradation before LLM calls so Pass 2 sees the same effective input.
             effective_input = canonical_input
             use_graceful_degradation = False
             excluded_doc_warning = ""
@@ -172,7 +171,7 @@ class SecurityGateway:
                 external_segments = risk_summary.get("external_segments", [])
                 internal_segments = risk_summary.get("internal_segments", [])
 
-                # Lower threshold from strict high-risk only to medium-risk plus outlier heuristics.
+                # Use medium-risk and outlier heuristics for external segments.
                 external_medium_risk = False
                 external_plausibility_hits: list[str] = []
                 for seg in external_segments:
@@ -216,14 +215,13 @@ class SecurityGateway:
                         risky_ids or "[unknown]",
                     )
 
-            # Structural risk from effective input.
             structural_flags = analyze_structure(
                 effective_input,
                 category=attack_category,
                 defender_task=defender_task,
             )
 
-            # Optional comparative plausibility signals.
+            # Apply comparative plausibility signals for comparative tasks.
             batch_context = ""
             plausibility_warning_block = ""
             document_texts: List[str] = []
@@ -284,7 +282,7 @@ class SecurityGateway:
                 use_graceful_degradation,
             )
 
-            # Pass 1: risk analysis + extraction.
+            # Pass 1: risk analysis and extraction.
             analysis_result = await analyze_and_extract(
                 untrusted_input=effective_input,
                 task_context=defender_task[:250] or "Process the request safely.",

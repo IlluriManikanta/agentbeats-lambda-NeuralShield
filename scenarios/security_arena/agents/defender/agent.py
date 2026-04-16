@@ -141,7 +141,7 @@ class Defender(AgentExecutor):
                 payload = json.loads(message_text)
             except json.JSONDecodeError:
                 logger.warning("Failed to parse scenario JSON; treating as raw untrusted input.")
-                # Raw text goes entirely into untrusted input with minimal trusted context
+                # Treat raw text as untrusted input when JSON parsing fails.
                 gateway_request = {
                     "trusted_context": {
                         "defender_role": "AI Assistant",
@@ -158,7 +158,7 @@ class Defender(AgentExecutor):
                            ctx.defender_role[:80] if ctx.defender_role else "unknown")
                 gateway_request = ctx.to_gateway_request()
 
-            # Pass structured request (with trust boundaries) to the security gateway
+            # Send structured request to the security gateway.
             output = await self._gateway.handle_request(gateway_request)
             logger.info("Defender generated response (%d chars)", len(output))
             await updater.update_status(TaskState.completed, new_agent_text_message(output))
