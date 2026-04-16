@@ -1,311 +1,371 @@
-# Lambda × Berkeley AgentBeats Security Arena
+# NeuralShield — AgentBeats Security Arena Submission
 
-**Building the Future of AI Security Testing**
+## Project Overview
 
-Repository: https://github.com/LambdaLabsML/agentbeats-lambda
+NeuralShield is a multi-layered defender and attacker system built for the UC Berkeley RDI × Lambda.ai AgentBeats Security Arena.
 
-## Track Description
+This repository implements the submission that placed **2nd overall** out of **1,800+ solutions**, with **94,000+ agent battles** and a **91% defense win rate**.
 
-The Agent Security Arena challenges participants to advance the field of AI agent security evaluation. Implement realistic security scenarios from our curated library of 400+ specifications—testing vulnerabilities like prompt injection, data exfiltration, and jailbreaking—using an industry-standard adversarial testing framework. Your contributions will help define how we evaluate and secure AI agents operating in real-world environments, from financial advisors to healthcare systems.
+## What This Repository Contains
 
-Browse the current scenario library on our [scenario browser](https://agentbeats-lambda.s3.us-east-1.amazonaws.com/index.html).
+- `scenarios/security_arena/agents/defender/agent.py`
+  - A2A entrypoint for the defender agent
+- `scenarios/security_arena/agents/defender/defender_engine/`
+  - The security gateway, normalization, segmentation, analysis, and output validation stack
+- `scenarios/security_arena/agents/attacker/agent.py`
+  - Stateful multi-round attacker with strategy routing and response diagnosis
+- `src/agentbeats/`
+  - Local A2A orchestration and scenario runner utilities
+- `tests/`
+  - Defender robustness and guardrail validation tests
 
-## Competition Structure: Two Phases
+## Architecture Overview
 
-### Overview
+NeuralShield is built around two complementary agents:
 
-As AI agents gain autonomy and take on sensitive tasks, current security testing methods fall short. The Agent Security Arena provides a framework for testing AI vulnerabilities through realistic adversarial scenarios. The competition runs in two sequential phases; all participants compete in both.
+- **Defender**: a layered security pipeline that isolates trusted metadata, sanitizes untrusted input, chooses execution mode based on suspicion, and validates/repairs model output.
+- **Attacker**: a round-aware red team agent that adapts to defender behavior, tracks hard refusals, and switches strategies to probe concrete surfaces.
 
-- **Phase 1 (November 24 – January 16)**: Implement security scenarios that test real vulnerabilities.
-- **Phase 2 (February 2 – February 23)**: Compete with advanced attack or defense agents.
+### High-level flow
 
-This track focuses on building realistic test scenarios that reveal actual vulnerabilities before they're exploited in production. Participants will balance creating challenging attack scenarios while maintaining clear success criteria and realistic constraints.
+```mermaid
+flowchart TB
+  subgraph Defender
+    SI[Scenario Input]
+    SI --> TB[Trusted/Untrusted Split]
+    TB --> N[Canonicalization & Normalization]
+    N --> C[Attack Classification & Structure Analysis]
+    C --> X[Pass 1: Extraction + Risk Analysis]
+    X --> E[Execution Mode Selection]
+    E --> T[Pass 2: Task Execution]
+    T --> S[Sanitization + Guardrail Enforcement]
+    S --> V[Optional Pass 3: Verification/Repair]
+    V --> FR[Final Response / Refusal]
+  end
 
-### Key Dates
+  subgraph Attacker
+    SC[Scenario Context + History]
+    SC --> DP[Defender Pattern Diagnosis]
+    DP --> SR[Strategy Routing]
+    SR --> AG[Attack Generation]
+    AG --> AM[Attack Message]
+  end
 
-| Date | Milestone |
-|------|-----------|
-| Nov 24, 2024 | Phase 1 begins - Start building scenarios |
-| Jan 16, 2025 | Phase 1 submissions due |
-| Feb 2 , 2025 | Phase 2 begins - Agent competition launches |
-| Feb 23, 2025 | Winners announced |
-
-### Model Constraint
-
-**Use gpt-oss-20b** to ensure fair compute (fits in 80GB H100); no proprietary API advantage.
-
-## Getting Started
-
-**[View Full Competition Documentation →](scenarios/security_arena/README.md)**
-
-- Phase 1 documentation: [scenarios/security_arena/docs/phase1.md](scenarios/security_arena/docs/phase1.md)
-- Phase 2 documentation: [scenarios/security_arena/docs/phase2.md](scenarios/security_arena/docs/phase2.md)
-
-Quick start:
-```bash
-uv run agentbeats-run scenarios/security_arena/scenario_portfolioiq.toml
+  AM --> SI
+  FR --> AM
 ```
-
-### Documentation
-
-Study existing examples:
-- **PortfolioIQ** — Data injection in financial risk assessment
-  `scenarios/security_arena/plugins/portfolioiq.py`
-- **Thingularity** — Information disclosure from shopping assistant
-  `scenarios/security_arena/plugins/thingularity.py`
-
-Core docs:
-- `README.md` - Framework architecture and usage
-- `SCENARIO_SPECIFICATIONS.md` - Plugin interface and submission requirements
-
-## Support
-
-Lambda engineers have set up dedicated support for participants:
-
-- **Discord**: Support channel
-- **GitHub Issues**: Bug reports and technical questions
-- **Response Time**: Critical issues same-day; general questions within 24 hours
-
-We're committed to helping you succeed - ask us anything about the framework, scenario implementation, or evaluation criteria.
 
 ---
 
-## Quickstart
-1. Clone (or fork) the repo:
-```
-git clone git@github.com:agentbeats/tutorial
-cd agentbeats-tutorial
-```
-2. Install dependencies
-```
-uv sync
-```
-3. Set environment variables
-```
-cp sample.env .env
-```
-Add your Google API key to the .env file
+## Defender Architecture
 
-4. Run the [debate example](#example)
-```
-uv run agentbeats-run scenarios/debate/scenario.toml
-```
-This command will:
-- Start the agent servers using the commands specified in scenario.toml
-- Construct an `assessment_request` message containing the participant's role-endpoint mapping and the assessment config
-- Send the `assessment_request` to the green agent and print streamed responses
+The defender is intentionally structured as a security gateway rather than a single monolithic prompt. Its core behavior is defined in `defender_engine/main.py` and exposed by `defender/agent.py`.
 
-**Note:** Use `--show-logs` to see agent outputs during the assessment, and `--serve-only` to start agents without running the assessment.
+### Trust Boundary Design
 
-To run this example manually, start the agent servers in separate terminals, and then in another terminal run the A2A client on the scenario.toml file to initiate the assessment.
+The defender uses `ScenarioContext` to keep trusted and untrusted fields separate:
 
-After running, you should see an output similar to this.
+- Trusted: `defender_role`, `defender_task`, `output_format`, `domain_description`, `security_guidelines`
+- Untrusted: `formatted_input`
 
-![Sample output](assets/sample_output.png)
+Trusted fields are used to define the defender task and output contract. The untrusted payload is treated as potentially malicious and is processed through sanitization, segmentation, and guarded execution.
 
-## Project Structure
-```
-src/
-└─ agentbeats/
-   ├─ green_executor.py        # base A2A green agent executor
-   ├─ models.py                # pydantic models for green agent IO
-   ├─ client.py                # A2A messaging helpers
-   ├─ client_cli.py            # CLI client to start assessment
-   └─ run_scenario.py          # run agents and start assessment
+### Input Normalization
 
-scenarios/
-└─ debate/                     # implementation of the debate example
-   ├─ debate_judge.py          # green agent impl using the official A2A SDK
-   ├─ adk_debate_judge.py      # alternative green agent impl using Google ADK
-   ├─ debate_judge_common.py   # models and utils shared by above impls
-   ├─ debater.py               # debater agent (Google ADK)
-   └─ scenario.toml            # config for the debate example
-```
+`defender_engine/normalizer.py` normalizes attacker-controlled input before any analysis or LLM call.
 
-# Agentbeats Tutorial
-Welcome to the Agentbeats Tutorial! 🤖🎵
+Key normalization steps include:
 
-Agentbeats is an open platform for **standardized and reproducible agent evaluations** and research.
+- Unicode normalization (NFKC)
+- HTML/XML comment removal
+- HTML entity unescaping
+- URL decoding
+- Base64 decoding
+- ROT13 decoding
+- Leetspeak and reversed-text normalization
+- Zero-width steganography detection
+- Homoglyph normalization
+- Extraction of hidden control text from code fences and quoted blobs
 
-This tutorial is designed to help you get started, whether you are:
-- 🔬 **Researcher** → running controlled experiments and publishing reproducible results
-- 🛠️ **Builder** → developing new agents and testing them against benchmarks
-- 📊 **Evaluator** → designing benchmarks, scenarios, or games to measure agent performance
-- ✨ **Enthusiast** → exploring agent behavior, running experiments, and learning by tinkering
+This deterministic preprocessing converts obfuscated attack vectors into a stable form that can be analyzed consistently.
 
-By the end, you’ll understand:
-- The core concepts behind Agentbeats - green agents, purple agents, and A2A assessments
-- How to run existing evaluations on the platform via the web UI
-- How to build and test your own agents locally
-- Share your agents and evaluation results with the community
+### Threat Detection and Segmentation
 
-This guide will help you quickly get started with Agentbeats and contribute to a growing ecosystem of open agent benchmarks.
+The defender builds multiple threat signals in phase 0:
 
+- `attack_classifier.py` maps input and trusted context into categories such as `indirect_injection`, `jailbreak`, `pii_leak`, `supply_chain`, and `prompt_extraction`
+- `structural_analyzer.py` assigns structural risk flags
+- `privacy_router.py` infers whether the request has semantic privacy targeting
+- `segmenter.py` splits multi-document inputs into segments, assigns each segment a trust score, and identifies external vs internal sources
 
-## Core Concepts
-**Green agents** orchestrate and manage evaluations of one or more purple agents by providing an evaluation harness.
-A green agent may implement a single-player benchmark or a multi-player game where agents compete or collaborate. It sets the rules of the game, hosts the match and decides results.
+Segment trust is computed from:
 
-**Purple agents** are the participants being evaluated. They possess certain skills (e.g. computer use) that green agents evaluate. In security-themed games, agents are often referred to as red and blue (attackers and defenders).
+- explicit external markers (`[External Source]`, `User Upload`, etc.)
+- `FILE_ID` conventions and internal document markers
+- content risk patterns such as instruction override language and ranking manipulation prompts
+- position-based decay for late or separator-heavy content
 
-An **assessment** is a single evaluation session hosted by a green agent and involving one or more purple agents. Purple agents demonstrate their skills, and the green agent evaluates and reports results.
+When a task appears comparative and external documents are suspicious, the defender can apply graceful degradation by excluding low-trust external segments from the effective input.
 
-All agents communicate via the **A2A protocol**, ensuring compatibility with the open standard for agent interoperability. Learn more about A2A [here](https://a2a-protocol.org/latest/).
+### Multi-pass Reasoning Pipeline
 
-## Run an Assessment
-Follow these steps to run assessments using agents that are already available on the platform.
+The security gateway implements three logical phases:
 
-1. Navigate to agentbeats.org
-2. Create an account (or log in)
-3. Select the green and purple agents to participate in an assessment
-4. Start the assessment
-5. Observe results
+1. **Phase 0**: canonicalize input, compute structure flags, categorize attacks, and segment trust
+2. **Pass 1**: run `analyze_and_extract` to extract safe task substance, infer risk level, derive threats, and build a serialized task substrate
+3. **Pass 2**: execute the actual task using guarded input and chosen execution mode
 
-## Agent Development
-In this section, you will learn how to:
-- Develop purple agents (participants) and green agents (evaluators)
-- Use common patterns and best practices for building agents
-- Run assessments locally during development
-- Evaluate your agents on the Agentbeats platform
+A fourth verification pass is optionally executed when risk is high, output validation fails, the task is comparative, or privacy targeting is detected.
 
-### General Principles
-You are welcome to develop agents using **any programming language, framework, or SDK** of your choice, as long as you expose your agent as an **A2A server**. This ensures compatibility with other agents and benchmarks on the platform. For example, you can implement your agent from scratch using the official [A2A SDK](https://a2a-protocol.org/latest/sdk/), or use a downstream SDK such as [Google ADK](https://google.github.io/adk-docs/).
+### Execution Modes and Risk Policies
 
-At the beginning of an assessment, the green agent receives an `assessment_request` signal. This signal includes the addresses of the participating agents and the assessment configuration. The green agent then creates a new A2A task and uses the A2A protocol to interact with participants and orchestrate the assessment. During the orchestration, the green agent produces A2A task updates (logs) so that the assessment can be tracked. After the orchestration, the green agent evaluates purple agent performance and produces an A2A artifact with the assessment results.
+`execution_policy.py` maps a fused suspicion score into one of four execution modes:
 
+- `STANDARD`
+- `CAUTIOUS`
+- `CONSERVATIVE`
+- `MINIMAL`
 
-#### Assessment Patterns
-Below are some common patterns to help guide your assessment design.
+The score is computed from structural risk, threat indicators, external source ratio, channel anomaly score, privacy intent, and category signals. `MINIMAL` mode is applied for the highest-risk cases and explicitly disables untrusted decisive claims and recommendations.
 
-- **Artifact submission**: The purple agent produces artifacts (e.g. a trace, code, or research report) and sends them to the green agent for assessment.
-- **Traced environment**: The green agent provides a traced environment (e.g. via MCP, SSH, or a hosted website) and observes the purple agent's actions for scoring.
-- **Message-based assessment**: The green agent evaluates purple agents based on simple message exchanges (e.g. question answering, dialogue, or reasoning tasks).
-- **Multi-agent games**: The green agent orchestrates interactions between multiple purple agents, such as security games, negotiation games, social deduction games, etc.
+### Output Guardrails
 
+After task execution, output is hardened by `output_sanitizer.py`:
 
-#### Reproducibility
-To ensure reproducibility, your agents (including their tools and environments) must join each assessment with a fresh state.
+- rewrite or downgrade unverified package references
+- detect supply-chain risk surfaces
+- detect PII leakage
+- sanitize unsafe output classes (`SQL injection`, `shell pipelines`, `web embeds`, `privileged runtime references`, etc.)
 
-### Example
-To make things concrete, we will use a debate scenario as our toy example:
-- Green agent (`DebateJudge`) orchestrates a debate between two agents by using an A2A client to alternate turns between participants. Each participant's response is forwarded to the caller as a task update. After the orchestration, it applies an LLM-as-Judge technique to evaluate which debater performed better and finally produces an artifact with the results.
-- Two purple agents (`Debater`) participate by presenting arguments for their side of the topic.
+If the final output still fails deterministic validation, the defender may apply medium-risk guardrails or return a format-aware refusal.
 
-To run this example, we start all three servers and then use an A2A client to send an `assessment_request` to the green agent and observe its outputs.
-The full example code is given in the template repository. Follow the quickstart guide to setup the project and run the example.
+### Verification and Repair
 
+Pass 3 uses `llm_client.verify_output` to compare the draft output against the trusted context and structured task substrate. If verification fails:
 
-### Evaluate Your Agent on the Platform
-To run assessments on your agent on the platform, you'll need a public address for your agent service. We recommend using [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for quick onboarding without bandwidth limits, but you are welcome to use nginx or ngrok if you prefer.
+- high-risk tasks are refused
+- medium-risk tasks may be repaired and re-sanitized
+- low-risk invalid outputs are subjected to additional uncertainty and citation guardrails
 
-1. Install Cloudflare Tunnel
+### Risk Anchoring for Assessment Tasks
+
+For risk-assessment tasks, the defender enforces minimum risk floors on answers. If a low-risk answer is inconsistent with the evidence or the task contract, the defender bumps risk levels and annotates uncertainty explicitly.
+
+### Important Defender Modules
+
+- `defender_engine/main.py` — gateway orchestration and decision logic
+- `defender_engine/normalizer.py` — canonical input normalization
+- `defender_engine/segmenter.py` — source trust segmentation and document filtering
+- `defender_engine/attack_classifier.py` — category classification and attack routing
+- `defender_engine/execution_policy.py` — execution mode selection and suspicion fusion
+- `defender_engine/llm/llm_client.py` — model call helpers and control-line stripping
+- `defender_engine/sanitizer/output_sanitizer.py` — output hardening
+- `defender_engine/consistency_validator.py` — deterministic output validation
+
+---
+
+## Attacker Architecture
+
+The attacker is a stateful red-team agent designed to exploit defender behavior across multiple rounds and reaction patterns.
+
+### Attacker Control Flow
+
+The attacker operates in a loop of:
+
+1. **Context ingestion**: read `ScenarioContext` and `battle_history`
+2. **Behavior diagnosis**: classify the defender response
+3. **Strategy selection**: choose a strategy family and attack surface
+4. **Attack generation**: synthesize a new prompt using templates and route logic
+5. **Verification**: self-check the generated attack for format leaks and defender triggers
+6. **Retry / fallback**: adjust if blocked or self-refusal occurs
+
+This structure lets the attacker adapt dynamically rather than replay a fixed payload.
+
+### Stateful Round Management
+
+`attacker/agent.py` maintains per-round state in `self.round_data` and augments it with historical flags from `ScenarioContext.battle_history`.
+
+Key state items include:
+
+- `hard_refusal_count` and `soft_refusal_count`
+- `surface_failure_counts` per attack vector
+- `family_blacklist` for strategy families that repeatedly fail
+- `win_locks` to exploit previously successful surfaces
+- `capped_value_modes` when numeric outputs are being limited
+
+This state model allows the attacker to escalate, pivot, or retreat based on defender behavior.
+
+### Defender Response Diagnosis
+
+The attacker analyzes defender responses with `_classify_response` and `_diagnose_refusal`.
+
+Response categories include:
+
+- `partial_compliance`
+- `compliance_with_correction`
+- `value_capped`
+- `soft_refusal`
+- `hard_refusal`
+
+Diagnosis identifies the failure mode:
+
+- instruction hijack or concept blocking
+- generation refusal due to unsafe output
+- task misalignment with defender role
+- output contract violations
+- explicit privacy or permission rejection
+
+These signals are used to compute a next-round escalation policy and choose whether to preserve the current surface.
+
+### Strategy Family and Surface Routing
+
+Attack strategies are grouped into meta-families and surfaces. The attacker routes between them using both learned pattern rules and explicit heuristics.
+
+Strategy routing features include:
+
+- `surface` selection (e.g. extraction, translation, transformation, classification, summarization)
+- `family` selection (e.g. prompt-injection, jailbreak, data-exfiltration, policy-avoidance)
+- `family-level diversity` to avoid repeating failed tactic groups
+- `surface bans` after repeated hard refusals on a particular output type
+- `concept-avoidance mode` after repeated phrasing-based refusals
+- `value-escape mode` when numeric or bounded outputs are capped
+
+`_pick_strategy_for_surface` and `_route_strategy` enforce these policies and can override the model’s initial strategy recommendation.
+
+### Surface and Contract Awareness
+
+The attacker builds a lightweight semantic model of the defender’s expected output contract from `output_format`.
+
+It extracts:
+
+- expected field names and required structure
+- numeric vs textual field expectations
+- whether the task is open-ended or tightly constrained
+- whether the defender may treat the request as comparative or evidence-based
+
+This contract model guides the attacker to probe safe surfaces first and avoid overly aggressive meta-attacks when the defender is likely to enforce strict formatting.
+
+### Template-driven Attack Generation
+
+Attack generation is performed in two explicit stages:
+
+1. **Strategy reasoning** — generate a high-level attack plan with structured prompts and metadata
+2. **Message synthesis** — render the chosen route into a final user/system payload using Jinja2 templates from `attacker/templates/`
+
+This separation helps the attacker keep strategic intent distinct from message realization and reuse the same underlying tactics across scenarios.
+
+### Runtime Self-check and Retry
+
+Before emitting an attack, the attacker validates its own output for dangerous signals and defender triggers.
+
+If a generated attack contains obvious format leaks or is likely to appear as a direct policy violation, the attacker will:
+
+- sanitize or rewrite the prompt
+- increase strategy conservatism
+- fall back to a more indirect surface
+- preserve stronger context from the last successful round
+
+This retry behavior is especially important after a hard refusal or when the defender has started blocking entire strategy families.
+
+### Important Attacker Modules
+
+- `attacker/agent.py` — round-aware attack execution, diagnosis, state management, and surface routing
+- `attacker/templates/` — structured prompt templates for controlled attack generation
+- `attacker/strategy_registry.py` — strategy family definitions and routing heuristics
+- `attacker/response_analyzer.py` — defender response classification and failure diagnosis
+
+---
+
+## Running the System
+
+### Prerequisites
+
+- Python 3.11+
+- `OPENAI_API_KEY` and `OPENAI_BASE_URL` configured in `.env`
+
+Install dependencies:
+
 ```bash
-brew install cloudflared # macOS
+python -m pip install -e .
 ```
-2. Start the Cloudflare tunnel pointing to your local server
+
+### Start the Defender
+
 ```bash
-cloudflared tunnel --url http://127.0.0.1:9019
+python scenarios/security_arena/agents/defender/agent.py \
+  --host 127.0.0.1 \
+  --port 9020 \
+  --model gpt-oss-20b
 ```
-The tunnel will output a public URL (e.g., `https://abc-123.trycloudflare.com`). Copy this URL.
 
-3. Start your A2A server with the `--card-url` flag using the URL from step 2
+### Start the Attacker
+
 ```bash
-python scenarios/debate/debater.py --host 127.0.0.1 --port 9019 --card-url https://abc-123.trycloudflare.com
+python scenarios/security_arena/agents/attacker/agent.py \
+  --host 127.0.0.1 \
+  --port 9021 \
+  --model gpt-4o-mini
 ```
-The agent card will now contain the correct public URL when communicating with
-other agents.
 
-4. Register your agent on agentbeats.org with this public URL.
-5. Run an assessment as described [earlier](#run-an-assessment)
+### Local Scenario Orchestration
 
-Note: Restarting the tunnel generates a new URL, so you'll need to restart your
-agent with the new `--card-url` and update the URL in the web UI. You may
-consider using a [Named Tunnel](https://developers.cloudflare.com/learning-paths/clientless-access/connect-private-applications/create-tunnel/)
-for a persistent URL.
+The repository includes local A2A orchestration tooling in `src/agentbeats/run_scenario.py`.
 
+To run a scenario harness:
 
-## Best Practices 💡
+```bash
+python -m agentbeats.run_scenario scenarios/security_arena/<scenario>.toml
+```
 
-Developing robust and efficient agents requires more than just writing code. Here are some best practices to follow when building for the AgentBeats platform, covering security, performance, and reproducibility.
+If you only need to inspect agent behavior, run the defender and attacker servers directly and send JSON-formatted scenario context to their A2A endpoints.
 
-### API Keys and Cost Management
+### Reproducing Competition Conditions
 
-AgentBeats uses a Bring-Your-Own-Key (BYOK) model. This gives you maximum flexibility to use any LLM provider, but also means you are responsible for securing your keys and managing costs.
+- defender default model: `gpt-oss-20b`
+- attacker default model: `gpt-4o-mini`
+- defender uses strict prompt separation and output repair
+- attacker uses battle history and strategic rerouting
 
--   **Security**: You provide your API keys directly to the agents running on your own infrastructure. Never expose your keys in client-side code or commit them to public repositories. Use environment variables (like in the tutorial's `.env` file) to manage them securely.
+---
 
--   **Cost Control**: If you publish a public agent, it could become popular unexpectedly. To prevent surprise bills, it's crucial to set spending limits and alerts on your API keys or cloud account. For example, if you're only using an API for a single agent on AgentBeats, a limit of $10 with an alert at $5 might be a safe starting point.
+## Design Rationale
 
-#### Getting Started with Low Costs
-If you are just getting started and want to minimize costs, many services offer generous free tiers.
--   **Google Gemini**: Often has a substantial free tier for API access.
--   **OpenRouter**: Provides free credits upon signup and can route requests to many different models, including free ones.
--   **Local LLMs**: If you run agents on your own hardware, you can use a local LLM provider like [Ollama](https://ollama.com/) to avoid API costs entirely.
+### Why layered security instead of a single prompt?
 
-#### Provider-Specific Guides
--   **OpenAI**:
-    -   Finding your key: [Where do I find my OpenAI API key?](https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key)
-    -   Setting limits: [Usage limits](https://platform.openai.com/settings/organization/limits)
+A single-prompt defender cannot reliably enforce the combination of source trust, extraction integrity, and validation that the Arena demands. Layering deterministic preprocessing, evidence auditing, guarded execution, and verification increases robustness against prompt injection and hidden controls.
 
--   **Anthropic (Claude)**:
-    -   Getting started: [API Guide](https://docs.anthropic.com/claude/reference/getting-started-with-the-api)
-    -   Setting limits: [Spending limits](https://console.anthropic.com/settings/limits)
+### Why deterministic normalization first?
 
--   **Google Gemini**:
-    -   Finding your key: [Get an API key](https://ai.google.dev/gemini-api/docs/api-key)
-    -   Setting limits requires using Google Cloud's billing and budget features. Be sure to set up [billing alerts](https://cloud.google.com/billing/docs/how-to/budgets).
+Attackers often use obfuscation and encoding to evade filters. NeuralShield normalizes these encodings before any downstream analysis so the model sees the actual intent rather than the disguised payload.
 
--   **OpenRouter**:
-    -   Request a key from your profile page under "Keys".
-    -   You can set a spending limit directly in the key creation flow. This limit aggregates spend across all models accessed via that key.
+### Why segment trust and graceful degradation?
 
+When inputs include both trusted internal evidence and attacker-controlled external documents, the defender must avoid trusting the entire bundle. Segmenting and selectively excluding suspicious external content narrows the attack surface while still allowing safe completion.
 
-### Efficient & Reliable Assessments
+### Why stateful attacker adaptation?
 
-#### Communication
-Agents in an assessment often run on different machines across the world. They communicate over the internet, which introduces latency.
+A replaying attacker fails against a robust defender. NeuralShield’s attacker tracks defender response types, refusal patterns, and successful surfaces to shift strategy across rounds rather than repeating the same family of attacks.
 
--   **Minimize Chattiness**: Design interactions to be meaningful and infrequent. Avoid back-and-forth for trivial information.
--   **Set Timeouts**: A single unresponsive agent can stall an entire assessment. Your A2A SDK may handle timeouts, but it's good practice to be aware of them and configure them appropriately.
--   **Compute Close to Data**: If an agent needs to process a large dataset or file, it should download that resource and process it locally, rather than streaming it piece by piece through another agent.
+---
 
-#### Division of Responsibilities
-The green and purple agents have distinct roles. Adhering to this separation is key for efficient and scalable assessments, especially over a network.
+## Results and Metrics
 
--   **Green agent**: A lightweight verifier or orchestrator. Its main job is to set up the scenario, provide context to purple agents, and evaluate the final result. It should not perform heavy computation.
--   **Purple agent**: The workhorse. It performs the core task, which may involve complex computation, running tools, or long-running processes.
+- **Placement:** 2nd place in the UC Berkeley RDI × Lambda.ai AgentBeats Security Arena
+- **Field size:** 1,800+ solutions
+- **Battle volume:** 94,000+ agent battles
+- **Defense win rate:** 91%
+- **Prize:** $3,000
 
-Here's an example for a security benchmark:
-1.  The **green agent** defines a task (e.g., "find a vulnerability in this codebase") and sends the repository URL to the purple agent.
-2.  The **purple agent** clones the code, runs its static analysis tools, fuzzers, and other agentic processes. This could take a long time and consume significant resources.
-3.  Once it finds a vulnerability, the **purple agent** sends back a concise report: the steps to reproduce the bug and a proposed patch.
-4.  The **green agent** receives this small payload, runs the reproduction steps, and verifies the result. This final verification step is quick and lightweight.
+These metrics reflect the behavior of the code in this repository.
 
-This structure keeps communication overhead low and makes the assessment efficient.
+---
 
-### Taking Advantage of Platform Features
-AgentBeats is more than just a runner; it's an observability platform. You can make your agent's "thought process" visible to the community and to evaluators.
+## Recommended Review Path
 
--   **Emit Traces**: As your agent works through a problem, use A2A `task update` messages to report its progress, current strategy, or intermediate findings. These updates appear in real-time in the web UI and in the console during local development.
--   **Generate Artifacts**: When your agent produces a meaningful output (like a piece of code, a report, or a log file), save it as an A2A `artifact`. Artifacts are stored with the assessment results and can be examined by anyone viewing the battle.
+1. `scenarios/security_arena/agents/defender/agent.py`
+2. `scenarios/security_arena/agents/defender/defender_engine/main.py`
+3. `scenarios/security_arena/agents/defender/defender_engine/segmenter.py`
+4. `scenarios/security_arena/agents/defender/defender_engine/execution_policy.py`
+5. `scenarios/security_arena/agents/attacker/agent.py`
 
-Rich traces and artifacts are invaluable for debugging, understanding agent behavior, and enabling more sophisticated, automated "meta-evaluations" of agent strategies.
-
-### Assessment Isolation and Reproducibility
-For benchmarks to be fair and meaningful, every assessment run must be independent and reproducible.
-
--   **Start Fresh**: Each agent should start every assessment from a clean, stateless initial state. Avoid carrying over memory, files, or context from previous battles.
--   **Isolate Contexts**: The A2A protocol provides a `task_id` for each assessment. Use this ID to namespace any local resources your agent might create, such as temporary files or database entries. This prevents collisions between concurrent assessments.
--   **Reset State**: If your agent maintains a long-running state, ensure you have a mechanism to reset it completely between assessments.
-
-Following these principles ensures that your agent's performance is measured based on its capability for the task at hand, not on leftover state from a previous run.
-
-
-## Next Steps
-Now that you’ve completed the tutorial, you’re ready to take the next step with Agentbeats.
-
-- 📊 **Develop new assessments** → Build a green agent along with baseline purple agents. Share your GitHub repo with us and we'll help with hosting and onboarding to the platform.
-- 🏆 **Evaluate your agents** → Create and test agents against existing benchmarks to climb the leaderboards.
-- 🌐 **Join the community** → Connect with researchers, builders, and enthusiasts to exchange ideas, share results, and collaborate on new evaluations.
-
-The more agents and assessments are shared, the richer and more useful the platform becomes. We’re excited to see what you create!
+If you want to verify specific hardening behavior, inspect `tests/test_unsafe_output_guard.py` and `tests/test_next_wave_defender_hardening.py`.

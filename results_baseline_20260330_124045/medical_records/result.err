@@ -1,0 +1,116 @@
+================================================================================
+ERROR LOG
+Generated: 2026-03-28T12:09:14.720559
+Scenario: medical_records
+Team: N/A
+================================================================================
+
+[2026-03-28 12:09:14.604] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': 'af1bd8d2-db37-45f8-8c04-045e06029c25', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': 'af1bd8d2-db37-45f8-8c04-045e06029c25', 'status': 'failed'}
+
+[2026-03-28 12:09:14.625] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '22852db9-15a2-4e88-9cad-82f299168115', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '22852db9-15a2-4e88-9cad-82f299168115', 'status': 'failed'}
+
+[2026-03-28 12:09:14.643] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': 'f2bd4a4f-7ba4-470e-8e66-b23490463178', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': 'f2bd4a4f-7ba4-470e-8e66-b23490463178', 'status': 'failed'}
+
+[2026-03-28 12:09:14.662] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '549f2747-57db-4746-ab0c-a6ea879f8cfa', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '549f2747-57db-4746-ab0c-a6ea879f8cfa', 'status': 'failed'}
+
+[2026-03-28 12:09:14.680] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '6ac6974e-da76-460a-bc66-c61e8b4a4206', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '6ac6974e-da76-460a-bc66-c61e8b4a4206', 'status': 'failed'}
+
+[2026-03-28 12:09:14.699] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '49e7cc36-6aca-4681-a765-11d5a1c36e28', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': '49e7cc36-6aca-4681-a765-11d5a1c36e28', 'status': 'failed'}
+
+[2026-03-28 12:09:14.717] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': 'ce75051c-9a0f-4f90-ae64-dedcdb14df54', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': 'Error: Blocked by sandbox network policy\nDestination: 209.20.159.254:8000\nReason: not on allow list', 'context_id': 'ce75051c-9a0f-4f90-ae64-dedcdb14df54', 'status': 'failed'}
+
+
+================================================================================
+Total errors: 7
+================================================================================

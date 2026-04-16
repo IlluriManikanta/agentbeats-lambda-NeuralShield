@@ -172,9 +172,11 @@ class GenericArenaOrchestrator(GreenAgent):
             # Get input template with placeholder for battle log display
             input_template = scenario.format_input("ATTACKER_OUTPUT")
 
+            eval_prov = getattr(scenario, "_evaluation_provenance", None)
             arena_result = ArenaResult(
                 team_name=team_name,
                 scenario_type=scenario_type,
+                evaluation_provenance=eval_prov,
                 winner=battle_result["winner"],
                 manipulation_round=battle_result.get("manipulation_round"),
                 rounds_defended=battle_result["rounds_defended"],
@@ -654,10 +656,35 @@ class GenericArenaOrchestrator(GreenAgent):
         fence = '`' * max_ticks
         return f"{fence}\n{content}\n{fence}"
 
+    def _evaluation_banner_md(self, arena_result: ArenaResult) -> list[str]:
+        """Markdown lines for alias/fallback evaluation (empty if canonical or missing)."""
+        ep = arena_result.evaluation_provenance
+        if not ep:
+            return []
+        mode = ep.get("evaluation_mode")
+        if mode == "canonical":
+            return []
+        if mode == "fallback":
+            return [
+                "> **LOCAL APPROXIMATE EVALUATION (fallback plugin).** "
+                "`winner` / manipulation detection are not competition-faithful "
+                "(success check disabled). Use this log for qualitative defender review.",
+                "",
+            ]
+        if mode == "alias":
+            orig = ep.get("original_scenario_type", "")
+            resolved = ep.get("resolved_scenario_type", "")
+            return [
+                f"> **Resolved via alias:** `{orig}` → `{resolved}` (canonical plugin).",
+                "",
+            ]
+        return []
+
     def _format_battle_log(self, arena_result: ArenaResult) -> str:
         """Format battle log as human-readable markdown."""
         lines = [
             "# Battle Log",
+            *self._evaluation_banner_md(arena_result),
             f"**Scenario:** {arena_result.scenario_type}",
             f"**Winner:** {arena_result.winner}",
             f"**Total Rounds:** {arena_result.total_rounds}",
@@ -767,6 +794,30 @@ class GenericArenaOrchestrator(GreenAgent):
             <div class="errors">
                 <h3>⚠️ Errors</h3>
                 <ul>{error_items}</ul>
+            </div>'''
+
+        provenance_html = ""
+        ep = arena_result.evaluation_provenance
+        if ep:
+            mode = ep.get("evaluation_mode")
+            if mode == "fallback":
+                provenance_html = '''
+            <div class="provenance-banner" style="background: #3d2914; border: 1px solid #a67c00; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                <strong>LOCAL APPROXIMATE EVALUATION (fallback plugin)</strong>
+                <p style="margin: 8px 0 0 0; color: #ccc;">
+                Winner and manipulation metrics are not competition-faithful (success check disabled).
+                Use this report for qualitative defender review.
+                </p>
+            </div>'''
+            elif mode == "alias":
+                orig = escape(str(ep.get("original_scenario_type", "")))
+                resolved = escape(str(ep.get("resolved_scenario_type", "")))
+                provenance_html = f'''
+            <div class="provenance-banner" style="background: #16213e; border: 1px solid #00d9ff; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                <strong>Resolved via alias</strong>
+                <p style="margin: 8px 0 0 0; color: #ccc;">
+                <code>{orig}</code> → <code>{resolved}</code> (canonical plugin)
+                </p>
             </div>'''
 
         return f'''<!DOCTYPE html>
@@ -944,6 +995,7 @@ class GenericArenaOrchestrator(GreenAgent):
         </div>
     </div>
 
+    {provenance_html}
     {error_html}
     {template_html}
 

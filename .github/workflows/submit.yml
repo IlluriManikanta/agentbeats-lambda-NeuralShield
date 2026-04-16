@@ -3,7 +3,7 @@ name: Submit Solution
 on:
   push:
     # Run on push to any of these branches (workflow uses the branch that triggered the push)
-    branches: [main, jeremy]
+    branches: [main, jeremy, mani]
   workflow_dispatch:
 
 jobs:
@@ -18,9 +18,9 @@ jobs:
         uses: LambdaLabsML/agentbeats-submission-action@main
         with:
           api_key: ${{ secrets.COMPETITION_API_KEY }}
-          role: 'attacker'
-          submission_path: './scenarios/security_arena/agents/attacker'
-          run_tests: 'false'
+          role: "attacker"
+          submission_path: "./scenarios/security_arena/agents/attacker"
+          run_tests: "false"
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           openai_base_url: ${{ secrets.OPENAI_BASE_URL }}
 
@@ -35,8 +35,8 @@ jobs:
         uses: LambdaLabsML/agentbeats-submission-action@main
         with:
           api_key: ${{ secrets.COMPETITION_API_KEY }}
-          role: 'defender'
-          submission_path: './scenarios/security_arena/agents/defender'
-          run_tests: 'false'
+          role: "defender"
+          submission_path: "./scenarios/security_arena/agents/defender"
+          run_tests: "false"
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           openai_base_url: ${{ secrets.OPENAI_BASE_URL }}

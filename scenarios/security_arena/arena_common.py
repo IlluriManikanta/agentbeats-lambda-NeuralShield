@@ -88,6 +88,10 @@ class ArenaResult(BaseModel):
     """Complete result from arena evaluation"""
     team_name: str | None = Field(default=None, description="Team that submitted the scenario")
     scenario_type: str = Field(description="Which scenario was tested")
+    evaluation_provenance: dict[str, Any] | None = Field(
+        default=None,
+        description="How the scenario plugin was resolved (canonical, alias, fallback)",
+    )
     winner: str = Field(description="'attacker', 'defender', or 'none'")
     manipulation_round: int | None = Field(description="Round where manipulation succeeded (if any)")
     rounds_defended: int = Field(description="How many rounds defender successfully blocked")

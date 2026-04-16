@@ -1,0 +1,41 @@
+================================================================================
+ERROR LOG
+Generated: 2026-03-30T12:26:41.643240
+Scenario: gymjailbreak
+Team: N/A
+================================================================================
+
+[2026-03-30 12:22:06.063] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': "Error: Attacker._generate_with_signal_ban() missing 1 required positional argument: 'signals'", 'context_id': 'c89c1d43-47db-4f0d-a1e2-bf7207127e81', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': "Error: Attacker._generate_with_signal_ban() missing 1 required positional argument: 'signals'", 'context_id': 'c89c1d43-47db-4f0d-a1e2-bf7207127e81', 'status': 'failed'}
+
+[2026-03-30 12:24:08.494] attacker crashed: http://127.0.0.1:9021/ responded with: {'response': "Error: Attacker._generate_with_signal_ban() missing 1 required positional argument: 'signals'", 'context_id': 'c89c1d43-47db-4f0d-a1e2-bf7207127e81', 'status': 'failed'}
+Traceback (most recent call last):
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/scenarios/security_arena/orchestrator.py", line 86, in _call_agent_with_timeout
+    response = await asyncio.wait_for(
+               ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/mani/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/lib/python3.13/asyncio/tasks.py", line 507, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/Users/mani/Developer/agentbeats-lambda-NeuralShield/src/agentbeats/tool_provider.py", line 22, in talk_to_agent
+    raise RuntimeError(f"{url} responded with: {outputs}")
+RuntimeError: http://127.0.0.1:9021/ responded with: {'response': "Error: Attacker._generate_with_signal_ban() missing 1 required positional argument: 'signals'", 'context_id': 'c89c1d43-47db-4f0d-a1e2-bf7207127e81', 'status': 'failed'}
+
+
+================================================================================
+Total errors: 2
+================================================================================

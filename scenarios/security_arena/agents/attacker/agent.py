@@ -104,7 +104,6 @@ def _defender_block_keywords() -> tuple[str, ...]:
         "list directory",
         "list files",
     )
-
 # Maps specific strategy labels to broad meta-categories for diversity tracking.
 # When all rounds in a family produce hard refusals, the next round must pick
 # from an untried family — prevents cycling within the same meta-category.

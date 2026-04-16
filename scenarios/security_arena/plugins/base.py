@@ -82,6 +82,7 @@ class ScenarioContext:
 
     # Input template (contains PLACE_ATTACK_HERE placeholder)
     input_format_template: str
+    security_guidelines: str = ""
 
     # Battle state (for attacker)
     current_round: int = 0
@@ -113,6 +114,7 @@ class ScenarioContext:
                 "defender_role": self.defender_role,
                 "defender_task": self.defender_task,
                 "output_format": self.output_format,
+                "security_guidelines": self.security_guidelines,
                 "input_format_template": self.input_format_template,
                 "current_round": self.current_round,
                 "battle_history": [r.to_dict() for r in self.battle_history],
@@ -124,6 +126,7 @@ class ScenarioContext:
                 "defender_role": self.defender_role,
                 "defender_task": self.defender_task,
                 "output_format": self.output_format,
+                "security_guidelines": self.security_guidelines,
                 "formatted_input": self.formatted_input,
             }
 
@@ -205,6 +208,7 @@ class ScenarioPlugin(ABC):
             defender_role=self.get_defender_role(),
             defender_task=self.get_defender_task_description(),
             output_format=self.get_output_format(),
+            security_guidelines=self.get_security_guidelines(),
             input_format_template=self.format_input("PLACE_ATTACK_HERE"),
             current_round=current_round,
             battle_history=battle_history or [],

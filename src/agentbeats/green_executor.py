@@ -1,4 +1,5 @@
 from abc import abstractmethod
+import os
 from pydantic import ValidationError
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -18,6 +19,7 @@ from a2a.utils import (
 from a2a.utils.errors import ServerError
 
 from agentbeats.models import EvalRequest
+from agentbeats.debug_runtime import append_debug_log
 
 
 class GreenAgent:
@@ -41,6 +43,7 @@ class GreenExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
+        run_id = os.getenv("AGENTBEATS_DEBUG_RUN_ID", "pre-fix")
         request_text = context.get_user_input()
         try:
             req: EvalRequest = EvalRequest.model_validate_json(request_text)
@@ -53,6 +56,19 @@ class GreenExecutor(AgentExecutor):
         msg = context.message
         if msg:
             task = new_task(msg)
+            # region agent log
+            append_debug_log(
+                run_id=run_id,
+                hypothesis_id="H4",
+                location="src/agentbeats/green_executor.py:execute:task_created",
+                message="Server received eval request",
+                data={
+                    "task_id": task.id,
+                    "context_id": task.context_id,
+                    "request_chars": len(request_text or ""),
+                },
+            )
+            # endregion
             await event_queue.enqueue_event(task)
         else:
             raise ServerError(error=InvalidParamsError(message="Missing message."))
@@ -72,6 +88,20 @@ class GreenExecutor(AgentExecutor):
                 pass  # Task already completed by agent
         except Exception as e:
             print(f"Agent error: {e}")
+            # region agent log
+            append_debug_log(
+                run_id=run_id,
+                hypothesis_id="H4",
+                location="src/agentbeats/green_executor.py:execute:run_eval_exception",
+                message="run_eval raised exception",
+                data={
+                    "exception_type": type(e).__name__,
+                    "exception_message": str(e),
+                    "context_id": context.context_id,
+                    "task_id": task.id,
+                },
+            )
+            # endregion
             try:
                 await updater.failed(new_agent_text_message(f"Agent error: {e}", context_id=context.context_id))
             except RuntimeError:
