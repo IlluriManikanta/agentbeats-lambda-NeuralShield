@@ -1,4 +1,16 @@
-# NeuralShield — AgentBeats Security Arena Submission
+# 🥈 NeuralShield — AgentBeats Security Arena Submission
+
+## Results and Metrics
+
+- **Placement:** 2nd place in the UC Berkeley RDI × Lambda.ai AgentBeats Security Arena
+- **Field size:** 1,800+ solutions
+- **Battle volume:** 94,000+ agent battles
+- **Defense win rate:** 91%
+- **Prize:** $3,000
+
+These metrics reflect the behavior of the code in this repository.
+
+---
 
 ## Project Overview
 
@@ -345,18 +357,6 @@ When inputs include both trusted internal evidence and attacker-controlled exter
 ### Why stateful attacker adaptation?
 
 A replaying attacker fails against a robust defender. NeuralShield’s attacker tracks defender response types, refusal patterns, and successful surfaces to shift strategy across rounds rather than repeating the same family of attacks.
-
----
-
-## Results and Metrics
-
-- **Placement:** 2nd place in the UC Berkeley RDI × Lambda.ai AgentBeats Security Arena
-- **Field size:** 1,800+ solutions
-- **Battle volume:** 94,000+ agent battles
-- **Defense win rate:** 91%
-- **Prize:** $3,000
-
-These metrics reflect the behavior of the code in this repository.
 
 ---
 
